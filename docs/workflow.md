@@ -52,7 +52,7 @@ Selecting the Claude project may be complex to implement (requires OAuth and Cla
 
 - Accept a YouTube URL as input.
 - Fetch the transcript automatically.
-- Generate a ready-to-upload `.txt` file named according to the convention (`Youtube - {channel_name} - {video_title}.txt`).
+- Generate a ready-to-upload file named according to the convention (`Youtube - {channel_name} - {video_title}t`).
 - Present it for download or copy — so the only remaining manual step is uploading it to the Claude project.
 
 This eliminates most of the friction with minimal implementation complexity.

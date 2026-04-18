@@ -83,7 +83,7 @@ Adapt from `/home/guido/projects/weekly-highlights/clients/claude_uploader.py` w
 **Conversation flow:**
 1. User sends YouTube URL → bot validates, fetches metadata via oEmbed
 2. Bot replies with video info + inline keyboard (one button per Claude project)
-3. User taps project button → bot fetches transcript, constructs filename (`Youtube - {channel} - {title}.txt`), uploads to selected project
+3. User taps project button → bot fetches transcript, constructs filename (`Youtube - {channel} - {title}`), uploads to selected project
 4. Bot confirms success or reports error (no captions, upload failure, etc.)
 
 **Implementation details:**

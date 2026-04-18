@@ -130,7 +130,7 @@ async def handle_project_selection(update: Update, context: ContextTypes.DEFAULT
 
     channel = sanitize_filename(metadata.channel_name)
     title = sanitize_filename(metadata.title)
-    file_name = f"Youtube - {channel} - {title}.txt"
+    file_name = f"Youtube - {channel} - {title}"
 
     try:
         client: ClaudeClient = context.bot_data["claude_client"]
