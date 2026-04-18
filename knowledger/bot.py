@@ -19,6 +19,23 @@ logger = get_logger(__name__)
 YOUTUBE_URL_PATTERN = r"https?://(www\.)?(youtube\.com/watch|youtu\.be/|youtube\.com/shorts/)\S+"
 
 
+def _build_keyboard(
+    projects: list[dict], msg_id: int | str, whitelist: frozenset[str], show_all: bool = False
+) -> InlineKeyboardMarkup:
+    if whitelist and not show_all:
+        visible = [p for p in projects if p["name"] in whitelist]
+        has_more = len(visible) < len(projects)
+    else:
+        visible = projects
+        has_more = False
+    keyboard = [
+        [InlineKeyboardButton(p["name"], callback_data=f"{p['uuid']}:{msg_id}")] for p in visible
+    ]
+    if has_more:
+        keyboard.append([InlineKeyboardButton("More...", callback_data=f"more:{msg_id}")])
+    return InlineKeyboardMarkup(keyboard)
+
+
 def _is_allowed(update: Update, config: Config) -> bool:
     user = update.effective_user
     if user is None or user.id not in config.allowed_user_ids:
@@ -86,9 +103,8 @@ async def handle_youtube_url(update: Update, context: ContextTypes.DEFAULT_TYPE)
     msg_id = update.message.message_id
     context.user_data[f"video_{msg_id}"] = metadata
 
-    keyboard = [
-        [InlineKeyboardButton(p["name"], callback_data=f"{p['uuid']}:{msg_id}")] for p in projects
-    ]
+    config: Config = context.bot_data["config"]
+    keyboard = _build_keyboard(projects, msg_id, config.project_whitelist)
 
     await update.message.reply_text(
         f"*{metadata.title}*\n_{metadata.channel_name}_\n\nSelect a project:",
@@ -113,6 +129,13 @@ async def handle_project_selection(update: Update, context: ContextTypes.DEFAULT
         return
 
     project_id, msg_id_str = parts
+
+    if project_id == "more":
+        projects: list[dict] = context.bot_data.get("projects", [])
+        keyboard = _build_keyboard(projects, msg_id_str, frozenset(), show_all=True)
+        await query.edit_message_reply_markup(reply_markup=keyboard)
+        return
+
     metadata: VideoMetadata | None = context.user_data.get(f"video_{msg_id_str}")
 
     if metadata is None:
