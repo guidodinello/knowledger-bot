@@ -15,6 +15,7 @@ class Config:
     telegram_bot_token: str
     claude_session_token: str
     allowed_user_ids: frozenset[int]
+    project_whitelist: frozenset[str] = frozenset()
 
 
 def load_config() -> Config:
@@ -38,8 +39,12 @@ def load_config() -> Config:
     if not allowed:
         raise ValueError("ALLOWED_USER_IDS must contain at least one user ID")
 
+    raw_whitelist = os.getenv("PROJECT_WHITELIST", "")
+    whitelist = frozenset(name.strip() for name in raw_whitelist.split(",") if name.strip())
+
     return Config(
         telegram_bot_token=token,
         claude_session_token=session,
         allowed_user_ids=allowed,
+        project_whitelist=whitelist,
     )
