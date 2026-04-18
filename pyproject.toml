@@ -1,0 +1,30 @@
+[project]
+name = "knowledger"
+version = "0.1.0"
+description = "Telegram bot that saves YouTube transcripts to Claude project knowledge bases"
+readme = "README.md"
+requires-python = ">=3.13"
+dependencies = [
+    "python-telegram-bot>=21.0",
+    "youtube-transcript-api>=1.0.0",
+    "curl-cffi>=0.7.0",
+    "python-dotenv>=1.0.0",
+]
+
+[dependency-groups]
+dev = ["pre-commit>=4.0.0"]
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.ruff]
+target-version = "py313"
+line-length = 100
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "UP", "B", "SIM"]
+ignore = ["SIM108"]
+
+[tool.ruff.lint.isort]
+known-first-party = ["knowledger"]
