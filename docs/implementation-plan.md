@@ -19,8 +19,8 @@ knowledger/
 ├── main.py                     # modify — bot entry point
 ├── .env.example                # create — document env vars
 ├── .gitignore                  # modify — add .env
-├── Dockerfile                  # create — Fly.io deployment
-├── fly.toml                    # create — Fly.io config
+├── Dockerfile                  # create — deployment
+├── railway.toml                # create — config
 └── knowledger/
     ├── __init__.py
     ├── config.py               # env var loading/validation
@@ -48,11 +48,11 @@ dependencies = [
 
 ## Environment Variables
 
-| Variable | Required | Description |
-|---|---|---|
-| `TELEGRAM_BOT_TOKEN` | Yes | From @BotFather |
-| `CLAUDE_SESSION_TOKEN` | Yes | `sessionKey` cookie from claude.ai |
-| `ALLOWED_USER_IDS` | Yes | Comma-separated Telegram user IDs (access control) |
+| Variable               | Required | Description                                        |
+| ---------------------- | -------- | -------------------------------------------------- |
+| `TELEGRAM_BOT_TOKEN`   | Yes      | From @BotFather                                    |
+| `CLAUDE_SESSION_TOKEN` | Yes      | `sessionKey` cookie from claude.ai                 |
+| `ALLOWED_USER_IDS`     | Yes      | Comma-separated Telegram user IDs (access control) |
 
 ## Implementation Steps
 
@@ -101,10 +101,10 @@ Adapt from `/home/guido/projects/weekly-highlights/clients/claude_uploader.py` w
 ### Step 6: Entry point (`main.py`)
 - Validate config, create bot, run polling
 
-### Step 7: Fly.io deployment
+### Step 7: Deployment
 - `Dockerfile` — Python 3.13-slim + uv, install deps, run bot
-- `fly.toml` — worker process (no HTTP service), primary region `iad`
-- Secrets set via `fly secrets set`
+- `railway.toml` — worker process (no HTTP service), primary region `iad`
+- Secrets set via `railway secrets set`
 
 ## Key Design Decisions
 
@@ -115,7 +115,7 @@ Adapt from `/home/guido/projects/weekly-highlights/clients/claude_uploader.py` w
 
 ## Risks and Mitigations
 
-- **Claude session token expires** (~weeks) → bot sends clear Telegram notification on 401/403; update via `fly secrets set`
+- **Claude session token expires** (~weeks) → bot sends clear Telegram notification on 401/403; update via `railway secrets set`
 - **Projects list endpoint unverified** → if `GET /api/organizations/{org_id}/projects` doesn't work, inspect claude.ai network tab to find correct endpoint
 - **youtube-transcript-api breakage** → actively maintained, usually fixed within days of YouTube changes
 
@@ -124,4 +124,4 @@ Adapt from `/home/guido/projects/weekly-highlights/clients/claude_uploader.py` w
 1. **Local testing:** Set env vars in `.env`, run `uv run python main.py`, send a real YouTube URL to the bot in Telegram
 2. **Verify each step:** metadata extraction shows correct title/channel, transcript is non-empty, project list appears as buttons, upload succeeds
 3. **Edge cases:** video with no captions (expect graceful "no transcript" message), YouTube Shorts URL, invalid URL
-4. **Deploy:** `fly launch`, `fly secrets set ...`, send a URL to the deployed bot
+4. **Deploy:** `railway launch`, `railway secrets set ...`, send a URL to the deployed bot
