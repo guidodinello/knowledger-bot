@@ -62,12 +62,49 @@ nano .env   # update CLAUDE_SESSION_TOKEN
 docker restart knowledger
 ```
 
-## 8. Updating the bot (after a git push)
+## 8. Day-2 operations (deploy script)
+
+A `deploy.sh` script at the project root handles common operations from your local machine:
 
 ```bash
-cd knowledger-bot
-git pull
-docker build -t knowledger .
-docker rm -f knowledger
-docker run -d --name knowledger --restart unless-stopped --env-file .env knowledger
+./deploy.sh env      # push .env.oracle to server and recreate container
+./deploy.sh update   # git pull on server, rebuild image, recreate container
+./deploy.sh logs     # tail container logs
+./deploy.sh restart  # recreate container (e.g. after manual server edits)
+```
+
+Keep `.env.oracle` locally, edit it there, and run `./deploy.sh env` to push.
+
+> **Note:** `docker restart` is not enough for env changes — it reuses the container's
+> original environment. You must `rm -f` the container and recreate it to pick up new
+> values from `--env-file`.
+
+## 9. Troubleshooting
+
+### A1.Flex out of capacity
+
+São Paulo has only one availability domain, so there is no alternative AD to try.
+Fall back to **VM.Standard.E2.1.Micro** (AMD, x86_64) — it is also Always Free and
+always has capacity. The rest of the guide is identical.
+
+### Public IP not assignable during instance creation
+
+If the "Assign public IPv4" toggle is greyed out with a warning about needing a public
+subnet, skip it and assign the IP post-creation:
+
+1. Instance page → **Networking** tab → click the VNIC
+2. **IP Addresses** tab → three-dot menu next to the private IP → **Edit**
+3. Select **Ephemeral public IP** → Save
+
+### `.env` values must not be quoted
+
+Docker's `--env-file` parser passes values literally — surrounding quotes become part of
+the string. Unlike `python-dotenv` (which strips them), Docker will pass `"8713385393"`
+as-is, causing `int()` conversion to fail.
+
+Keep values unquoted in `.env.oracle`:
+
+```
+ALLOWED_USER_IDS=123456789    # correct
+ALLOWED_USER_IDS="123456789"  # wrong — quotes included in value
 ```
