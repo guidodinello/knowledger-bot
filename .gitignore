@@ -14,3 +14,4 @@ wheels/
 .env*
 deploy.env
 .vscode/
+docs/improvements/
