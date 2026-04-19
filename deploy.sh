@@ -21,7 +21,7 @@ sync_env() {
 }
 
 recreate() {
-    $SSH "cd $REMOTE_DIR && docker rm -f knowledger; docker run -d --name knowledger --restart unless-stopped --env-file .env --log-opt max-size=10m --log-opt max-file=3 knowledger"
+    $SSH "cd $REMOTE_DIR && docker rm -f knowledger; docker run -d --name knowledger --restart unless-stopped --network=host --env-file .env --log-opt max-size=10m --log-opt max-file=3 knowledger"
 }
 
 case "${1:-}" in

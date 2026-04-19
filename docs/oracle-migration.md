@@ -79,7 +79,30 @@ Keep `.env.oracle` locally, edit it there, and run `./deploy.sh env` to push.
 > original environment. You must `rm -f` the container and recreate it to pick up new
 > values from `--env-file`.
 
-## 9. Troubleshooting
+## 9. YouTube proxy (Cloudflare WARP)
+
+Oracle Cloud IPs are blocked by YouTube's transcript API. Install Cloudflare WARP in
+proxy mode to route transcript requests through Cloudflare's network:
+
+```bash
+wget -q https://pkg.cloudflareclient.com/pubkey.gpg -O - | sudo gpg --dearmor -o /usr/share/keyrings/cloudflare-warp-archive-keyring.gpg
+echo "deb [signed-by=/usr/share/keyrings/cloudflare-warp-archive-keyring.gpg] https://pkg.cloudflareclient.com/ jammy main" | sudo tee /etc/apt/sources.list.d/cloudflare-client.list
+sudo apt update && sudo apt install -y cloudflare-warp
+warp-cli registration new   # accept ToS when prompted
+warp-cli mode proxy
+warp-cli connect
+warp-cli status             # should show: Connected, Network: healthy
+```
+
+Then add to `.env.oracle`:
+
+```
+YOUTUBE_PROXY=socks5://127.0.0.1:40000
+```
+
+WARP runs as a systemd service and starts automatically on reboot — no manual reconnect needed.
+
+## 10. Troubleshooting
 
 ### A1.Flex out of capacity
 
