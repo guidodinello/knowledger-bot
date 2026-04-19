@@ -79,28 +79,33 @@ Keep `.env.oracle` locally, edit it there, and run `./deploy.sh env` to push.
 > original environment. You must `rm -f` the container and recreate it to pick up new
 > values from `--env-file`.
 
-## 9. YouTube proxy (Cloudflare WARP)
+## 9. YouTube IP blocking — known issue
 
-Oracle Cloud IPs are blocked by YouTube's transcript API. Install Cloudflare WARP in
-proxy mode to route transcript requests through Cloudflare's network:
+Oracle Cloud IPs are blocked by YouTube's transcript API (`RequestBlocked` error).
+**This is the main unresolved problem with Oracle Cloud for this bot.**
 
-```bash
-wget -q https://pkg.cloudflareclient.com/pubkey.gpg -O - | sudo gpg --dearmor -o /usr/share/keyrings/cloudflare-warp-archive-keyring.gpg
-echo "deb [signed-by=/usr/share/keyrings/cloudflare-warp-archive-keyring.gpg] https://pkg.cloudflareclient.com/ jammy main" | sudo tee /etc/apt/sources.list.d/cloudflare-client.list
-sudo apt update && sudo apt install -y cloudflare-warp
-warp-cli registration new   # accept ToS when prompted
-warp-cli mode proxy
-warp-cli connect
-warp-cli status             # should show: Connected, Network: healthy
-```
+### What was tried and why it failed
 
-Then add to `.env.oracle`:
+| Approach | Result |
+|----------|--------|
+| Cloudflare WARP (proxy mode, `socks5://127.0.0.1:40000`) | Routes through Cloudflare datacenter IPs — also blocked by YouTube |
+| Webshare free proxies (`WebshareProxyConfig`) | Free tier uses datacenter IPs — also blocked/rate-limited (429 + Google CAPTCHA redirect) |
 
-```
-YOUTUBE_PROXY=socks5://127.0.0.1:40000
-```
+**Key insight:** YouTube blocks all datacenter/cloud provider IPs. Only **residential** proxies
+(traffic routed through real home ISP connections) reliably bypass this.
 
-WARP runs as a systemd service and starts automatically on reboot — no manual reconnect needed.
+### What would actually work
+
+- **Webshare Static Residential** (~$6/month, 20 proxies, 250 GB) — wire up via `WebshareProxyConfig`
+  with `WEBSHARE_PROXY_USERNAME` and `WEBSHARE_PROXY_PASSWORD` env vars; the bot already supports this
+- **Any residential SOCKS5 proxy** — set `YOUTUBE_PROXY=socks5://user:pass@host:port` and use
+  `GenericProxyConfig` in `transcript.py`
+
+### Note on Docker networking
+
+When running the bot in Docker with a proxy on the host (e.g. WARP on `127.0.0.1:40000`),
+the container's `127.0.0.1` is not the host's. Use `--network=host` in the `docker run` command
+(already set in `deploy.sh`) so the container shares the host's network namespace.
 
 ## 10. Troubleshooting
 
