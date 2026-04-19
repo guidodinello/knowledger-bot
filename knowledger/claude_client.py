@@ -1,10 +1,18 @@
 import json
+from http import HTTPStatus
+from typing import TypedDict
 
 from curl_cffi import requests
 
 from .logger import get_logger
 
 logger = get_logger(__name__)
+
+
+class Project(TypedDict):
+    uuid: str
+    name: str
+
 
 BASE_URL = "https://claude.ai/api"
 USER_AGENT = (
@@ -53,14 +61,14 @@ class ClaudeClient:
 
         raise ValueError("No organization found with 'chat' or 'claude_pro' capabilities")
 
-    def _check_auth(self, response) -> None:
-        if response.status_code in (401, 403):
+    def _check_auth(self, response: requests.Response) -> None:
+        if response.status_code in (HTTPStatus.UNAUTHORIZED, HTTPStatus.FORBIDDEN):
             raise AuthError(
                 "Claude session token is invalid or expired. "
                 "Update CLAUDE_SESSION_TOKEN with a fresh sessionKey cookie from claude.ai."
             )
 
-    def list_projects(self) -> list[dict]:
+    def list_projects(self) -> list[Project]:
         response = requests.get(
             f"{BASE_URL}/organizations/{self._org_id}/projects",
             headers=self._get_headers(),
@@ -82,7 +90,7 @@ class ClaudeClient:
         )
         self._check_auth(response)
 
-        if response.status_code != 201:
+        if response.status_code != HTTPStatus.CREATED:
             logger.error("Upload failed: %d %s", response.status_code, response.text)
             response.raise_for_status()
 
