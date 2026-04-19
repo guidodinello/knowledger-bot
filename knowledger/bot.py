@@ -109,7 +109,7 @@ async def handle_youtube_url(update: Update, context: ContextTypes.DEFAULT_TYPE)
     await update.message.reply_text(
         f"*{metadata.title}*\n_{metadata.channel_name}_\n\nSelect a project:",
         parse_mode="Markdown",
-        reply_markup=InlineKeyboardMarkup(keyboard),
+        reply_markup=keyboard,
     )
 
 
