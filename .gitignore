@@ -12,3 +12,4 @@ wheels/
 # Environment variables
 !.env.example
 .env*
+deploy.env
