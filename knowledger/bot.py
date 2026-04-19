@@ -1,6 +1,10 @@
+from typing import Any, TypedDict
+
+from curl_cffi.requests.exceptions import RequestException
 from telegram import InlineKeyboardButton, InlineKeyboardMarkup, Update
 from telegram.ext import (
     Application,
+    CallbackContext,
     CallbackQueryHandler,
     CommandHandler,
     ContextTypes,
@@ -8,7 +12,7 @@ from telegram.ext import (
     filters,
 )
 
-from .claude_client import AuthError, ClaudeClient
+from .claude_client import AuthError, ClaudeClient, Project
 from .config import Config
 from .logger import get_logger
 from .transcript import fetch_transcript
@@ -16,11 +20,20 @@ from .youtube import VideoMetadata, extract_video_id, fetch_video_metadata, sani
 
 logger = get_logger(__name__)
 
+
+class BotData(TypedDict):
+    config: Config
+    claude_client: ClaudeClient
+    projects: list[Project]
+
+
+CustomContext = CallbackContext[Any, dict, dict, BotData]
+
 YOUTUBE_URL_PATTERN = r"https?://(www\.)?(youtube\.com/watch|youtu\.be/|youtube\.com/shorts/)\S+"
 
 
 def _build_keyboard(
-    projects: list[dict], msg_id: int | str, whitelist: frozenset[str], show_all: bool = False
+    projects: list[Project], msg_id: int | str, whitelist: frozenset[str], show_all: bool = False
 ) -> InlineKeyboardMarkup:
     if whitelist and not show_all:
         visible = [p for p in projects if p["name"] in whitelist]
@@ -44,9 +57,8 @@ def _is_allowed(update: Update, config: Config) -> bool:
     return True
 
 
-async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    config: Config = context.bot_data["config"]
-    if not _is_allowed(update, config):
+async def cmd_start(update: Update, context: CustomContext) -> None:
+    if not _is_allowed(update, context.bot_data["config"]):
         return
     await update.message.reply_text(
         "Send me a YouTube URL and I'll let you pick a Claude project to save the "
@@ -54,19 +66,17 @@ async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     )
 
 
-async def cmd_help(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+async def cmd_help(update: Update, context: CustomContext) -> None:
     await cmd_start(update, context)
 
 
-async def cmd_refresh(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    config: Config = context.bot_data["config"]
-    if not _is_allowed(update, config):
+async def cmd_refresh(update: Update, context: CustomContext) -> None:
+    if not _is_allowed(update, context.bot_data["config"]):
         return
 
     await update.message.reply_text("Refreshing project list...")
     try:
-        client: ClaudeClient = context.bot_data["claude_client"]
-        context.bot_data["projects"] = client.list_projects()
+        context.bot_data["projects"] = context.bot_data["claude_client"].list_projects()
         await update.message.reply_text(
             f"Done. {len(context.bot_data['projects'])} project(s) loaded."
         )
@@ -74,9 +84,8 @@ async def cmd_refresh(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
         await update.message.reply_text(f"Auth error: {e}")
 
 
-async def handle_youtube_url(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    config: Config = context.bot_data["config"]
-    if not _is_allowed(update, config):
+async def handle_youtube_url(update: Update, context: CustomContext) -> None:
+    if not _is_allowed(update, context.bot_data["config"]):
         return
 
     url = update.message.text.strip()
@@ -88,12 +97,12 @@ async def handle_youtube_url(update: Update, context: ContextTypes.DEFAULT_TYPE)
 
     try:
         metadata: VideoMetadata = fetch_video_metadata(url)
-    except Exception as e:
+    except (RequestException, ValueError) as e:
         logger.exception("Failed to fetch metadata for %s", url)
         await update.message.reply_text(f"Failed to fetch video info: {e}")
         return
 
-    projects: list[dict] = context.bot_data.get("projects", [])
+    projects = context.bot_data["projects"]
     if not projects:
         await update.message.reply_text(
             "No projects loaded. Use /refresh to load your Claude projects."
@@ -103,8 +112,7 @@ async def handle_youtube_url(update: Update, context: ContextTypes.DEFAULT_TYPE)
     msg_id = update.message.message_id
     context.user_data[f"video_{msg_id}"] = metadata
 
-    config: Config = context.bot_data["config"]
-    keyboard = _build_keyboard(projects, msg_id, config.project_whitelist)
+    keyboard = _build_keyboard(projects, msg_id, context.bot_data["config"].project_whitelist)
 
     await update.message.reply_text(
         f"*{metadata.title}*\n_{metadata.channel_name}_\n\nSelect a project:",
@@ -113,11 +121,10 @@ async def handle_youtube_url(update: Update, context: ContextTypes.DEFAULT_TYPE)
     )
 
 
-async def handle_project_selection(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+async def handle_project_selection(update: Update, context: CustomContext) -> None:
     query = update.callback_query
-    config: Config = context.bot_data["config"]
 
-    if not _is_allowed(update, config):
+    if not _is_allowed(update, context.bot_data["config"]):
         await query.answer("Access denied.")
         return
 
@@ -131,8 +138,9 @@ async def handle_project_selection(update: Update, context: ContextTypes.DEFAULT
     project_id, msg_id_str = parts
 
     if project_id == "more":
-        projects: list[dict] = context.bot_data.get("projects", [])
-        keyboard = _build_keyboard(projects, msg_id_str, frozenset(), show_all=True)
+        keyboard = _build_keyboard(
+            context.bot_data["projects"], msg_id_str, frozenset(), show_all=True
+        )
         await query.edit_message_reply_markup(reply_markup=keyboard)
         return
 
@@ -156,8 +164,7 @@ async def handle_project_selection(update: Update, context: ContextTypes.DEFAULT
     file_name = f"Youtube - {channel} - {title}"
 
     try:
-        client: ClaudeClient = context.bot_data["claude_client"]
-        client.upload_content(project_id, transcript, file_name)
+        context.bot_data["claude_client"].upload_content(project_id, transcript, file_name)
     except AuthError as e:
         await query.edit_message_text(f"Auth error: {e}")
         return
@@ -176,7 +183,12 @@ def build_application(config: Config) -> Application:
     projects = client.list_projects()
     logger.info("Loaded %d Claude project(s)", len(projects))
 
-    app = Application.builder().token(config.telegram_bot_token).build()
+    app = (
+        Application.builder()
+        .token(config.telegram_bot_token)
+        .context_types(ContextTypes(bot_data=BotData))
+        .build()
+    )
     app.bot_data["config"] = config
     app.bot_data["claude_client"] = client
     app.bot_data["projects"] = projects
