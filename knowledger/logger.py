@@ -1,7 +1,10 @@
 import logging
+import os
 import sys
 from logging.handlers import RotatingFileHandler
 from pathlib import Path
+
+_level = os.getenv("LOG_LEVEL", "INFO").upper()
 
 
 def get_logger(name: str, log_file: Path | None = None) -> logging.Logger:
@@ -21,5 +24,5 @@ def get_logger(name: str, log_file: Path | None = None) -> logging.Logger:
         fh.setFormatter(fmt)
         logger.addHandler(fh)
 
-    logger.setLevel(logging.INFO)
+    logger.setLevel(_level)
     return logger
