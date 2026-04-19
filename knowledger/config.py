@@ -5,8 +5,6 @@ from dotenv import load_dotenv
 
 from .logger import get_logger
 
-load_dotenv(override=True)
-
 logger = get_logger(__name__)
 
 
@@ -19,6 +17,7 @@ class Config:
 
 
 def load_config() -> Config:
+    load_dotenv(override=True)
     token = os.getenv("TELEGRAM_BOT_TOKEN")
     if not token:
         raise ValueError("TELEGRAM_BOT_TOKEN is required")
