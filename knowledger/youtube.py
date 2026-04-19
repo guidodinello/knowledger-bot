@@ -1,3 +1,4 @@
+import html
 import logging
 import re
 from dataclasses import dataclass
@@ -45,7 +46,7 @@ def _fetch_page_title(video_id: str) -> str | None:
     )
     response.raise_for_status()
     match = re.search(r'<meta property="og:title" content="([^"]+)"', response.text)
-    return match.group(1) if match else None
+    return html.unescape(match.group(1)) if match else None
 
 
 def fetch_video_metadata(url: str) -> VideoMetadata:
