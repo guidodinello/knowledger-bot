@@ -28,3 +28,7 @@ ignore = ["SIM108"]
 
 [tool.ruff.lint.isort]
 known-first-party = ["knowledger"]
+
+[tool.pyright]
+venvPath = "."
+venv = ".venv"
