@@ -25,7 +25,9 @@ def fetch_transcript(video_id: str) -> str | None:
             transcript = transcript_list.find_transcript(["en"]).fetch()
         except NoTranscriptFound:
             transcript = next(iter(transcript_list)).fetch()
-        return "\n".join(snippet.text.strip() for snippet in transcript.snippets)
+        text = "\n".join(snippet.text.strip() for snippet in transcript.snippets)
+        logger.info("Fetched transcript via YouTube API for %s", video_id)
+        return text
     except RequestBlocked:
         logger.warning("YouTube blocked transcript request for %s, trying Invidious", video_id)
         return fetch_transcript_invidious(video_id)
