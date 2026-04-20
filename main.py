@@ -1,6 +1,11 @@
+from datetime import date
+from pathlib import Path
+
 from knowledger.bot import build_application
 from knowledger.config import load_config
-from knowledger.logger import get_logger
+from knowledger.logger import get_logger, init_logging
+
+init_logging(Path(f"knowledger_{date.today()}.log"))
 
 logger = get_logger(__name__)
 
