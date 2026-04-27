@@ -12,7 +12,7 @@ from telegram.ext import (
     filters,
 )
 
-from .claude_client import AuthError, ClaudeClient, Project
+from .claude_client import AuthError, ClaudeClient, Doc, Project
 from .config import Config
 from .logger import get_logger
 from .transcript import fetch_transcript
@@ -25,6 +25,12 @@ class BotData(TypedDict):
     config: Config
     claude_client: ClaudeClient
     projects: list[Project]
+
+
+class PendingUpload(TypedDict):
+    project_id: str
+    file_name: str
+    transcript: str
 
 
 CustomContext = CallbackContext[Any, dict, dict, BotData]
@@ -164,6 +170,38 @@ async def handle_project_selection(update: Update, context: CustomContext) -> No
     file_name = f"Youtube - {channel} - {title}"
 
     try:
+        docs: list[Doc] = context.bot_data["claude_client"].list_docs(project_id)
+    except AuthError as e:
+        await query.edit_message_text(f"Auth error: {e}")
+        return
+    except Exception as e:
+        logger.exception("Failed to list docs for project %s", project_id)
+        await query.edit_message_text(f"Failed to check for duplicates: {e}")
+        return
+
+    existing = next((d for d in docs if d["file_name"] == file_name), None)
+    if existing:
+        context.user_data[f"pending_{msg_id_str}"] = PendingUpload(
+            project_id=project_id, file_name=file_name, transcript=transcript
+        )
+        keyboard = InlineKeyboardMarkup(
+            [
+                [
+                    InlineKeyboardButton("Skip", callback_data=f"skip:{msg_id_str}"),
+                    InlineKeyboardButton(
+                        "Overwrite", callback_data=f"overwrite:{existing['uuid']}:{msg_id_str}"
+                    ),
+                ]
+            ]
+        )
+        await query.edit_message_text(
+            f"⚠️ *{file_name}* already exists in this project.\n\nSkip or overwrite?",
+            parse_mode="Markdown",
+            reply_markup=keyboard,
+        )
+        return
+
+    try:
         context.bot_data["claude_client"].upload_content(project_id, transcript, file_name)
     except AuthError as e:
         await query.edit_message_text(f"Auth error: {e}")
@@ -176,6 +214,53 @@ async def handle_project_selection(update: Update, context: CustomContext) -> No
     context.user_data.pop(f"video_{msg_id_str}", None)
 
     await query.edit_message_text(f"Saved *{file_name}* to project.", parse_mode="Markdown")
+
+
+async def handle_duplicate_choice(update: Update, context: CustomContext) -> None:
+    query = update.callback_query
+
+    if not _is_allowed(update, context.bot_data["config"]):
+        await query.answer("Access denied.")
+        return
+
+    await query.answer()
+
+    action, *rest = query.data.split(":")
+
+    if action == "skip":
+        msg_id_str = rest[0]
+        context.user_data.pop(f"video_{msg_id_str}", None)
+        context.user_data.pop(f"pending_{msg_id_str}", None)
+        await query.edit_message_text("Already in project — skipped.")
+        return
+
+    doc_uuid, msg_id_str = rest[0], rest[1]
+    pending: PendingUpload | None = context.user_data.get(f"pending_{msg_id_str}")
+    if pending is None:
+        await query.edit_message_text("Session expired. Please send the URL again.")
+        return
+
+    await query.edit_message_text("Overwriting...")
+
+    try:
+        context.bot_data["claude_client"].delete_doc(pending["project_id"], doc_uuid)
+        context.bot_data["claude_client"].upload_content(
+            pending["project_id"], pending["transcript"], pending["file_name"]
+        )
+    except AuthError as e:
+        await query.edit_message_text(f"Auth error: {e}")
+        return
+    except Exception as e:
+        logger.exception("Overwrite failed for %s", pending["file_name"])
+        await query.edit_message_text(f"Overwrite failed: {e}")
+        return
+
+    context.user_data.pop(f"video_{msg_id_str}", None)
+    context.user_data.pop(f"pending_{msg_id_str}", None)
+
+    await query.edit_message_text(
+        f"Saved *{pending['file_name']}* to project.", parse_mode="Markdown"
+    )
 
 
 def build_application(config: Config) -> Application:
@@ -199,6 +284,7 @@ def build_application(config: Config) -> Application:
     app.add_handler(
         MessageHandler(filters.TEXT & filters.Regex(YOUTUBE_URL_PATTERN), handle_youtube_url)
     )
+    app.add_handler(CallbackQueryHandler(handle_duplicate_choice, pattern=r"^(skip|overwrite):"))
     app.add_handler(CallbackQueryHandler(handle_project_selection))
 
     return app

@@ -14,6 +14,11 @@ class Project(TypedDict):
     name: str
 
 
+class Doc(TypedDict):
+    uuid: str
+    file_name: str
+
+
 BASE_URL = "https://claude.ai/api"
 USER_AGENT = (
     "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
@@ -77,6 +82,25 @@ class ClaudeClient:
         self._check_auth(response)
         response.raise_for_status()
         return response.json()
+
+    def list_docs(self, project_id: str) -> list[Doc]:
+        response = requests.get(
+            f"{BASE_URL}/organizations/{self._org_id}/projects/{project_id}/docs",
+            headers=self._get_headers(),
+            impersonate="chrome110",
+        )
+        self._check_auth(response)
+        response.raise_for_status()
+        return response.json()
+
+    def delete_doc(self, project_id: str, doc_uuid: str) -> None:
+        response = requests.delete(
+            f"{BASE_URL}/organizations/{self._org_id}/projects/{project_id}/docs/{doc_uuid}",
+            headers=self._get_headers(),
+            impersonate="chrome110",
+        )
+        self._check_auth(response)
+        response.raise_for_status()
 
     def upload_content(self, project_id: str, content: str, file_name: str) -> dict:
         url = f"{BASE_URL}/organizations/{self._org_id}/projects/{project_id}/docs"
