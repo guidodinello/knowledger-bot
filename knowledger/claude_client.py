@@ -1,4 +1,5 @@
 import json
+from functools import cached_property
 from http import HTTPStatus
 from typing import TypedDict
 
@@ -33,7 +34,6 @@ class AuthError(Exception):
 class ClaudeClient:
     def __init__(self, session_token: str) -> None:
         self._cookie = f"sessionKey={session_token}"
-        self._org_id = self._get_organization_id()
 
     def _get_headers(self) -> dict[str, str]:
         return {
@@ -51,7 +51,8 @@ class ClaudeClient:
             "Cookie": self._cookie,
         }
 
-    def _get_organization_id(self) -> str:
+    @cached_property
+    def _org_id(self) -> str:
         response = requests.get(
             f"{BASE_URL}/organizations",
             headers=self._get_headers(),
@@ -62,7 +63,7 @@ class ClaudeClient:
 
         for org in response.json():
             if "chat" in org["capabilities"] or "claude_pro" in org["capabilities"]:
-                return org["uuid"]
+                return str(org["uuid"])
 
         raise ValueError("No organization found with 'chat' or 'claude_pro' capabilities")
 
@@ -73,7 +74,8 @@ class ClaudeClient:
                 "Update CLAUDE_SESSION_TOKEN with a fresh sessionKey cookie from claude.ai."
             )
 
-    def list_projects(self) -> list[Project]:
+    @cached_property
+    def projects(self) -> list[Project]:
         response = requests.get(
             f"{BASE_URL}/organizations/{self._org_id}/projects",
             headers=self._get_headers(),
@@ -82,6 +84,9 @@ class ClaudeClient:
         self._check_auth(response)
         response.raise_for_status()
         return response.json()
+
+    def invalidate_projects(self) -> None:
+        self.__dict__.pop("projects", None)
 
     def list_docs(self, project_id: str) -> list[Doc]:
         response = requests.get(
