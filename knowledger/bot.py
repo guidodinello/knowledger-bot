@@ -215,7 +215,9 @@ async def handle_project_selection(update: Update, context: CustomContext) -> No
 
     context.user_data.pop(f"video_{msg_id_str}", None)
 
-    await query.edit_message_text(f"Saved *{file_name}* to project.", parse_mode="Markdown")
+    await query.edit_message_text(
+        f"Saved *{escape_markdown(file_name, version=1)}* to project.", parse_mode="Markdown"
+    )
 
 
 async def handle_duplicate_choice(update: Update, context: CustomContext) -> None:
