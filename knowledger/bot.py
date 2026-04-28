@@ -179,7 +179,11 @@ async def handle_youtube_url(update: Update, context: CustomContext) -> None:
         await update.message.reply_text(f"Failed to fetch video info: {e}")
         return
 
-    projects = await asyncio.to_thread(lambda: context.bot_data["claude_client"].projects)
+    try:
+        projects = await asyncio.to_thread(lambda: context.bot_data["claude_client"].projects)
+    except AuthError as e:
+        await update.message.reply_text(f"Auth error: {e}")
+        return
     if not projects:
         await update.message.reply_text(
             "No projects found. Use /refresh to reload your Claude projects."
@@ -217,7 +221,13 @@ async def handle_project_selection(update: Update, context: CustomContext) -> No
 
     match project_id:
         case "more":
-            projects = await asyncio.to_thread(lambda: context.bot_data["claude_client"].projects)
+            try:
+                projects = await asyncio.to_thread(
+                    lambda: context.bot_data["claude_client"].projects
+                )
+            except AuthError as e:
+                await query.answer(str(e)[:200])
+                return
             keyboard = _build_keyboard(projects, msg_id_str, frozenset(), show_all=True)
             await query.edit_message_reply_markup(reply_markup=keyboard)
             return
