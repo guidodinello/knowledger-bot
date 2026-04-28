@@ -1,3 +1,4 @@
+from datetime import UTC, datetime
 from typing import Any, TypedDict
 
 from curl_cffi.requests.exceptions import RequestException
@@ -15,6 +16,7 @@ from telegram.ext import (
 from .claude_client import AuthError, ClaudeClient, Project
 from .config import Config
 from .logger import get_logger
+from .queue import QueueEntry, drain_queue, enqueue
 from .transcript import fetch_transcript
 from .youtube import VideoMetadata, extract_video_id, fetch_video_metadata, sanitize_filename
 
@@ -82,6 +84,40 @@ async def cmd_refresh(update: Update, context: CustomContext) -> None:
         )
     except AuthError as e:
         await update.message.reply_text(f"Auth error: {e}")
+        return
+
+    await _drain_and_retry_queue(update, context)
+
+
+async def _drain_and_retry_queue(update: Update, context: CustomContext) -> None:
+    entries = drain_queue()
+    if not entries:
+        return
+
+    failed = []
+    for entry in entries:
+        try:
+            context.bot_data["claude_client"].upload_content(
+                entry.project_id, entry.transcript, entry.file_name
+            )
+            await context.bot.send_message(
+                entry.chat_id,
+                f"Queued upload saved: *{entry.file_name}*",
+                parse_mode="Markdown",
+            )
+        except AuthError:
+            failed.append(entry)
+        except Exception:
+            logger.exception("Queue retry failed for %s", entry.file_name)
+            failed.append(entry)
+
+    for entry in failed:
+        enqueue(entry)
+
+    summary = f"{len(entries) - len(failed)}/{len(entries)} queued upload(s) processed."
+    if failed:
+        summary += f" {len(failed)} failed and re-queued."
+    await update.message.reply_text(summary)
 
 
 async def handle_youtube_url(update: Update, context: CustomContext) -> None:
@@ -165,8 +201,21 @@ async def handle_project_selection(update: Update, context: CustomContext) -> No
 
     try:
         context.bot_data["claude_client"].upload_content(project_id, transcript, file_name)
-    except AuthError as e:
-        await query.edit_message_text(f"Auth error: {e}")
+    except AuthError:
+        entry = QueueEntry(
+            project_id=project_id,
+            file_name=file_name,
+            transcript=transcript,
+            chat_id=update.effective_chat.id,
+            video_title=metadata.title,
+            queued_at=datetime.now(UTC).isoformat(),
+        )
+        added = enqueue(entry)
+        if added:
+            msg = f"Token expired — *{file_name}* queued. Run /refresh after updating the token."
+        else:
+            msg = f"Token expired — *{file_name}* was already queued."
+        await query.edit_message_text(msg, parse_mode="Markdown")
         return
     except Exception as e:
         logger.exception("Upload failed for %s", file_name)
