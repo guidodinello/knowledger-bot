@@ -1,21 +1,18 @@
-import os
-
 from youtube_transcript_api import NoTranscriptFound, TranscriptsDisabled, YouTubeTranscriptApi
 from youtube_transcript_api._errors import RequestBlocked
 from youtube_transcript_api.proxies import WebshareProxyConfig
 
+from .config import ProxyConfig
 from .invidious import fetch_transcript as fetch_transcript_invidious
 from .logger import get_logger
 
 logger = get_logger(__name__)
 
 
-def fetch_transcript(video_id: str) -> str | None:
-    username = os.getenv("WEBSHARE_PROXY_USERNAME")
-    password = os.getenv("WEBSHARE_PROXY_PASSWORD")
+def fetch_transcript(video_id: str, proxy: ProxyConfig | None = None) -> str | None:
     proxy_config = (
-        WebshareProxyConfig(proxy_username=username, proxy_password=password)
-        if username and password
+        WebshareProxyConfig(proxy_username=proxy.username, proxy_password=proxy.password)
+        if proxy is not None
         else None
     )
     try:

@@ -9,11 +9,18 @@ logger = get_logger(__name__)
 
 
 @dataclass(frozen=True, slots=True)
+class ProxyConfig:
+    username: str
+    password: str
+
+
+@dataclass(frozen=True, slots=True)
 class Config:
     telegram_bot_token: str
     claude_session_token: str
     allowed_user_ids: frozenset[int]
     project_whitelist: frozenset[str] = frozenset()
+    proxy: ProxyConfig | None = None
 
 
 def load_config() -> Config:
@@ -41,9 +48,16 @@ def load_config() -> Config:
     raw_whitelist = os.getenv("PROJECT_WHITELIST", "")
     whitelist = frozenset(name.strip() for name in raw_whitelist.split(",") if name.strip())
 
+    proxy_username = os.getenv("WEBSHARE_PROXY_USERNAME")
+    proxy_password = os.getenv("WEBSHARE_PROXY_PASSWORD")
+    proxy = (
+        ProxyConfig(proxy_username, proxy_password) if proxy_username and proxy_password else None
+    )
+
     return Config(
         telegram_bot_token=token,
         claude_session_token=session,
         allowed_user_ids=allowed,
         project_whitelist=whitelist,
+        proxy=proxy,
     )
