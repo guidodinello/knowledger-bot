@@ -105,7 +105,8 @@ async def cmd_refresh(update: Update, context: CustomContext) -> None:
     client = context.bot_data["claude_client"]
     client.invalidate_projects()
     try:
-        await update.message.reply_text(f"Done. {len(client.projects)} project(s) loaded.")
+        projects = await asyncio.to_thread(lambda: client.projects)
+        await update.message.reply_text(f"Done. {len(projects)} project(s) loaded.")
     except AuthError as e:
         await update.message.reply_text(f"Auth error: {e}")
         return
@@ -178,7 +179,7 @@ async def handle_youtube_url(update: Update, context: CustomContext) -> None:
         await update.message.reply_text(f"Failed to fetch video info: {e}")
         return
 
-    projects = context.bot_data["claude_client"].projects
+    projects = await asyncio.to_thread(lambda: context.bot_data["claude_client"].projects)
     if not projects:
         await update.message.reply_text(
             "No projects found. Use /refresh to reload your Claude projects."
@@ -216,9 +217,8 @@ async def handle_project_selection(update: Update, context: CustomContext) -> No
 
     match project_id:
         case "more":
-            keyboard = _build_keyboard(
-                context.bot_data["claude_client"].projects, msg_id_str, frozenset(), show_all=True
-            )
+            projects = await asyncio.to_thread(lambda: context.bot_data["claude_client"].projects)
+            keyboard = _build_keyboard(projects, msg_id_str, frozenset(), show_all=True)
             await query.edit_message_reply_markup(reply_markup=keyboard)
             return
 
