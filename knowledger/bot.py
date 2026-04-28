@@ -11,6 +11,7 @@ from telegram.ext import (
     MessageHandler,
     filters,
 )
+from telegram.helpers import escape_markdown
 
 from .claude_client import AuthError, ClaudeClient, Doc, Project
 from .config import Config
@@ -194,8 +195,9 @@ async def handle_project_selection(update: Update, context: CustomContext) -> No
                 ]
             ]
         )
+        safe_name = escape_markdown(file_name, version=1)
         await query.edit_message_text(
-            f"⚠️ *{file_name}* already exists in this project.\n\nSkip or overwrite?",
+            f"⚠️ *{safe_name}* already exists in this project.\n\nSkip or overwrite?",
             parse_mode="Markdown",
             reply_markup=keyboard,
         )
@@ -228,12 +230,18 @@ async def handle_duplicate_choice(update: Update, context: CustomContext) -> Non
     action, *rest = query.data.split(":")
 
     if action == "skip":
+        if not rest:
+            await query.edit_message_text("Invalid choice data.")
+            return
         msg_id_str = rest[0]
         context.user_data.pop(f"video_{msg_id_str}", None)
         context.user_data.pop(f"pending_{msg_id_str}", None)
         await query.edit_message_text("Already in project — skipped.")
         return
 
+    if len(rest) < 2:
+        await query.edit_message_text("Invalid choice data.")
+        return
     doc_uuid, msg_id_str = rest[0], rest[1]
     pending: PendingUpload | None = context.user_data.get(f"pending_{msg_id_str}")
     if pending is None:
@@ -259,7 +267,8 @@ async def handle_duplicate_choice(update: Update, context: CustomContext) -> Non
     context.user_data.pop(f"pending_{msg_id_str}", None)
 
     await query.edit_message_text(
-        f"Saved *{pending['file_name']}* to project.", parse_mode="Markdown"
+        f"Saved *{escape_markdown(pending['file_name'], version=1)}* to project.",
+        parse_mode="Markdown",
     )
 
 
