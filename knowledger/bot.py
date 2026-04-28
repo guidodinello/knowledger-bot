@@ -1,8 +1,10 @@
+import asyncio
 from datetime import UTC, datetime
 from typing import Any, TypedDict
 
 from curl_cffi.requests.exceptions import RequestException
 from telegram import InlineKeyboardButton, InlineKeyboardMarkup, Update
+from telegram.helpers import escape_markdown
 from telegram.ext import (
     Application,
     CallbackContext,
@@ -97,26 +99,37 @@ async def _drain_and_retry_queue(update: Update, context: CustomContext) -> None
     failed = []
     for entry in entries:
         try:
-            context.bot_data["claude_client"].upload_content(
-                entry.project_id, entry.transcript, entry.file_name
-            )
-            await context.bot.send_message(
-                entry.chat_id,
-                f"Queued upload saved: *{entry.file_name}*",
-                parse_mode="Markdown",
+            await asyncio.to_thread(
+                context.bot_data["claude_client"].upload_content,
+                entry.project_id, entry.transcript, entry.file_name,
             )
         except AuthError:
             failed.append(entry)
+            continue
         except Exception:
             logger.exception("Queue retry failed for %s", entry.file_name)
             failed.append(entry)
+            continue
+        escaped = escape_markdown(entry.file_name, version=1)
+        await context.bot.send_message(
+            entry.chat_id,
+            f"Queued upload saved: *{escaped}*",
+            parse_mode="Markdown",
+        )
 
+    could_not_reenqueue = []
     for entry in failed:
-        enqueue(entry)
+        try:
+            enqueue(entry)
+        except Exception:
+            logger.exception("Failed to re-enqueue %s", entry.file_name)
+            could_not_reenqueue.append(entry)
 
     summary = f"{len(entries) - len(failed)}/{len(entries)} queued upload(s) processed."
     if failed:
         summary += f" {len(failed)} failed and re-queued."
+    if could_not_reenqueue:
+        summary += f" Warning: {len(could_not_reenqueue)} could not be re-queued (storage error)."
     await update.message.reply_text(summary)
 
 
@@ -219,10 +232,11 @@ async def handle_project_selection(update: Update, context: CustomContext) -> No
                 f"Token expired and queuing failed — please resend the URL after updating the token."
             )
             return
+        escaped = escape_markdown(file_name, version=1)
         if added:
-            msg = f"Token expired — *{file_name}* queued. Run /refresh after updating the token."
+            msg = f"Token expired — *{escaped}* queued. Run /refresh after updating the token."
         else:
-            msg = f"Token expired — *{file_name}* was already queued."
+            msg = f"Token expired — *{escaped}* was already queued."
         await query.edit_message_text(msg, parse_mode="Markdown")
         return
     except Exception as e:

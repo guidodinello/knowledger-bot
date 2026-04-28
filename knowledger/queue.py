@@ -27,7 +27,7 @@ def _load(path: Path) -> list[QueueEntry]:
     except FileNotFoundError:
         return []
     except Exception:
-        logger.warning("Queue file %s is corrupt or unreadable; treating as empty", path)
+        logger.warning("Queue file %s is corrupt or unreadable; treating as empty", path, exc_info=True)
         return []
 
 
