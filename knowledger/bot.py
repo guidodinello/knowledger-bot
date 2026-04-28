@@ -29,7 +29,6 @@ logger = get_logger(__name__)
 class BotData(TypedDict):
     config: Config
     claude_client: ClaudeClient
-    projects: list[Project]
     queue: Queue
 
 
@@ -103,11 +102,10 @@ async def cmd_refresh(update: Update, context: CustomContext) -> None:
     if update.message is None:
         return
     await update.message.reply_text("Refreshing project list...")
+    client = context.bot_data["claude_client"]
+    client.invalidate_projects()
     try:
-        context.bot_data["projects"] = context.bot_data["claude_client"].list_projects()
-        await update.message.reply_text(
-            f"Done. {len(context.bot_data['projects'])} project(s) loaded."
-        )
+        await update.message.reply_text(f"Done. {len(client.projects)} project(s) loaded.")
     except AuthError as e:
         await update.message.reply_text(f"Auth error: {e}")
         return
@@ -180,10 +178,10 @@ async def handle_youtube_url(update: Update, context: CustomContext) -> None:
         await update.message.reply_text(f"Failed to fetch video info: {e}")
         return
 
-    projects = context.bot_data["projects"]
+    projects = context.bot_data["claude_client"].projects
     if not projects:
         await update.message.reply_text(
-            "No projects loaded. Use /refresh to load your Claude projects."
+            "No projects found. Use /refresh to reload your Claude projects."
         )
         return
 
@@ -219,7 +217,7 @@ async def handle_project_selection(update: Update, context: CustomContext) -> No
     match project_id:
         case "more":
             keyboard = _build_keyboard(
-                context.bot_data["projects"], msg_id_str, frozenset(), show_all=True
+                context.bot_data["claude_client"].projects, msg_id_str, frozenset(), show_all=True
             )
             await query.edit_message_reply_markup(reply_markup=keyboard)
             return
@@ -373,10 +371,6 @@ async def handle_duplicate_choice(update: Update, context: CustomContext) -> Non
 
 
 def build_application(config: Config) -> Application:
-    client = ClaudeClient(config.claude_session_token)
-    projects = client.list_projects()
-    logger.info("Loaded %d Claude project(s)", len(projects))
-
     app = (
         Application.builder()
         .token(config.telegram_bot_token)
@@ -384,8 +378,7 @@ def build_application(config: Config) -> Application:
         .build()
     )
     app.bot_data["config"] = config
-    app.bot_data["claude_client"] = client
-    app.bot_data["projects"] = projects
+    app.bot_data["claude_client"] = ClaudeClient(config.claude_session_token)
     app.bot_data["queue"] = Queue()
 
     app.add_handler(CommandHandler("start", cmd_start))
