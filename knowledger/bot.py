@@ -204,13 +204,21 @@ async def handle_project_selection(update: Update, context: CustomContext) -> No
     except AuthError:
         entry = QueueEntry(
             project_id=project_id,
+            video_id=metadata.video_id,
             file_name=file_name,
             transcript=transcript,
             chat_id=update.effective_chat.id,
             video_title=metadata.title,
             queued_at=datetime.now(UTC).isoformat(),
         )
-        added = enqueue(entry)
+        try:
+            added = enqueue(entry)
+        except Exception:
+            logger.exception("Failed to enqueue %s", file_name)
+            await query.edit_message_text(
+                f"Token expired and queuing failed — please resend the URL after updating the token."
+            )
+            return
         if added:
             msg = f"Token expired — *{file_name}* queued. Run /refresh after updating the token."
         else:
