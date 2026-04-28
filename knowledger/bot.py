@@ -1,10 +1,10 @@
 import asyncio
 from datetime import UTC, datetime
+from functools import wraps
 from typing import Any, TypedDict
 
 from curl_cffi.requests.exceptions import RequestException
 from telegram import InlineKeyboardButton, InlineKeyboardMarkup, Update
-from telegram.helpers import escape_markdown
 from telegram.ext import (
     Application,
     CallbackContext,
@@ -19,7 +19,7 @@ from telegram.helpers import escape_markdown
 from .claude_client import AuthError, ClaudeClient, Doc, Project
 from .config import Config
 from .logger import get_logger
-from .queue import QueueEntry, drain_queue, enqueue
+from .queue import Queue, QueueEntry
 from .transcript import fetch_transcript
 from .youtube import VideoMetadata, extract_video_id, fetch_video_metadata, sanitize_filename
 
@@ -30,6 +30,7 @@ class BotData(TypedDict):
     config: Config
     claude_client: ClaudeClient
     projects: list[Project]
+    queue: Queue
 
 
 class PendingUpload(TypedDict):
@@ -44,7 +45,10 @@ YOUTUBE_URL_PATTERN = r"https?://(www\.)?(youtube\.com/watch|youtu\.be/|youtube\
 
 
 def _build_keyboard(
-    projects: list[Project], msg_id: int | str, whitelist: frozenset[str], show_all: bool = False
+    projects: list[Project],
+    msg_id: int | str,
+    whitelist: frozenset[str],
+    show_all: bool = False,
 ) -> InlineKeyboardMarkup:
     if whitelist and not show_all:
         visible = [p for p in projects if p["name"] in whitelist]
@@ -68,8 +72,21 @@ def _is_allowed(update: Update, config: Config) -> bool:
     return True
 
 
+def _require_auth(handler):
+    @wraps(handler)
+    async def wrapper(update: Update, context: CustomContext):
+        if not _is_allowed(update, context.bot_data["config"]):
+            if update.callback_query:
+                await update.callback_query.answer("Access denied.")
+            return
+        return await handler(update, context)
+
+    return wrapper
+
+
+@_require_auth
 async def cmd_start(update: Update, context: CustomContext) -> None:
-    if not _is_allowed(update, context.bot_data["config"]):
+    if update.message is None:
         return
     await update.message.reply_text(
         "Send me a YouTube URL and I'll let you pick a Claude project to save the "
@@ -81,10 +98,10 @@ async def cmd_help(update: Update, context: CustomContext) -> None:
     await cmd_start(update, context)
 
 
+@_require_auth
 async def cmd_refresh(update: Update, context: CustomContext) -> None:
-    if not _is_allowed(update, context.bot_data["config"]):
+    if update.message is None:
         return
-
     await update.message.reply_text("Refreshing project list...")
     try:
         context.bot_data["projects"] = context.bot_data["claude_client"].list_projects()
@@ -99,7 +116,9 @@ async def cmd_refresh(update: Update, context: CustomContext) -> None:
 
 
 async def _drain_and_retry_queue(update: Update, context: CustomContext) -> None:
-    entries = drain_queue()
+    if update.message is None:
+        return
+    entries = context.bot_data["queue"].drain()
     if not entries:
         return
 
@@ -108,7 +127,9 @@ async def _drain_and_retry_queue(update: Update, context: CustomContext) -> None
         try:
             await asyncio.to_thread(
                 context.bot_data["claude_client"].upload_content,
-                entry.project_id, entry.transcript, entry.file_name,
+                entry.project_id,
+                entry.transcript,
+                entry.file_name,
             )
         except AuthError:
             failed.append(entry)
@@ -127,7 +148,7 @@ async def _drain_and_retry_queue(update: Update, context: CustomContext) -> None
     could_not_reenqueue = []
     for entry in failed:
         try:
-            enqueue(entry)
+            context.bot_data["queue"].enqueue(entry)
         except Exception:
             logger.exception("Failed to re-enqueue %s", entry.file_name)
             could_not_reenqueue.append(entry)
@@ -140,8 +161,9 @@ async def _drain_and_retry_queue(update: Update, context: CustomContext) -> None
     await update.message.reply_text(summary)
 
 
+@_require_auth
 async def handle_youtube_url(update: Update, context: CustomContext) -> None:
-    if not _is_allowed(update, context.bot_data["config"]):
+    if update.message is None or update.message.text is None or context.user_data is None:
         return
 
     url = update.message.text.strip()
@@ -152,7 +174,7 @@ async def handle_youtube_url(update: Update, context: CustomContext) -> None:
     await update.message.reply_text("Fetching video info...")
 
     try:
-        metadata: VideoMetadata = fetch_video_metadata(url)
+        metadata = fetch_video_metadata(url)
     except (RequestException, ValueError) as e:
         logger.exception("Failed to fetch metadata for %s", url)
         await update.message.reply_text(f"Failed to fetch video info: {e}")
@@ -177,15 +199,16 @@ async def handle_youtube_url(update: Update, context: CustomContext) -> None:
     )
 
 
+@_require_auth
 async def handle_project_selection(update: Update, context: CustomContext) -> None:
     query = update.callback_query
-
-    if not _is_allowed(update, context.bot_data["config"]):
-        await query.answer("Access denied.")
+    if query is None or context.user_data is None:
         return
 
     await query.answer()
 
+    if query.data is None:
+        return
     parts = query.data.split(":", 1)
     if len(parts) != 2:
         await query.edit_message_text("Invalid selection data.")
@@ -193,12 +216,13 @@ async def handle_project_selection(update: Update, context: CustomContext) -> No
 
     project_id, msg_id_str = parts
 
-    if project_id == "more":
-        keyboard = _build_keyboard(
-            context.bot_data["projects"], msg_id_str, frozenset(), show_all=True
-        )
-        await query.edit_message_reply_markup(reply_markup=keyboard)
-        return
+    match project_id:
+        case "more":
+            keyboard = _build_keyboard(
+                context.bot_data["projects"], msg_id_str, frozenset(), show_all=True
+            )
+            await query.edit_message_reply_markup(reply_markup=keyboard)
+            return
 
     metadata: VideoMetadata | None = context.user_data.get(f"video_{msg_id_str}")
 
@@ -208,7 +232,7 @@ async def handle_project_selection(update: Update, context: CustomContext) -> No
 
     await query.edit_message_text("Fetching transcript...")
 
-    transcript = fetch_transcript(metadata.video_id)
+    transcript = fetch_transcript(metadata.video_id, proxy=context.bot_data["config"].proxy)
     if transcript is None:
         await query.edit_message_text(
             f"No captions available for *{metadata.title}*.", parse_mode="Markdown"
@@ -255,6 +279,8 @@ async def handle_project_selection(update: Update, context: CustomContext) -> No
     try:
         context.bot_data["claude_client"].upload_content(project_id, transcript, file_name)
     except AuthError:
+        if update.effective_chat is None:
+            return
         entry = QueueEntry(
             project_id=project_id,
             video_id=metadata.video_id,
@@ -265,11 +291,11 @@ async def handle_project_selection(update: Update, context: CustomContext) -> No
             queued_at=datetime.now(UTC).isoformat(),
         )
         try:
-            added = enqueue(entry)
+            added = context.bot_data["queue"].enqueue(entry)
         except Exception:
             logger.exception("Failed to enqueue %s", file_name)
             await query.edit_message_text(
-                f"Token expired and queuing failed — please resend the URL after updating the token."
+                "Token expired and queuing failed — please resend the URL after updating the token."
             )
             return
         escaped = escape_markdown(file_name, version=1)
@@ -291,15 +317,16 @@ async def handle_project_selection(update: Update, context: CustomContext) -> No
     )
 
 
+@_require_auth
 async def handle_duplicate_choice(update: Update, context: CustomContext) -> None:
     query = update.callback_query
-
-    if not _is_allowed(update, context.bot_data["config"]):
-        await query.answer("Access denied.")
+    if query is None or context.user_data is None:
         return
 
     await query.answer()
 
+    if query.data is None:
+        return
     action, *rest = query.data.split(":")
 
     if action == "skip":
@@ -359,6 +386,7 @@ def build_application(config: Config) -> Application:
     app.bot_data["config"] = config
     app.bot_data["claude_client"] = client
     app.bot_data["projects"] = projects
+    app.bot_data["queue"] = Queue()
 
     app.add_handler(CommandHandler("start", cmd_start))
     app.add_handler(CommandHandler("help", cmd_help))
