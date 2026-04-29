@@ -1,6 +1,7 @@
 import asyncio
 
 from aiohttp import web
+from aiohttp.web_middlewares import middleware
 
 from .claude_client import AuthError, ClaudeClient, get_org_id_for_token
 from .logger import get_logger
@@ -46,12 +47,28 @@ async def _handle_update_token(request: web.Request) -> web.Response:
     return web.json_response({"status": "ok"})
 
 
+@middleware
+async def _cors_middleware(request: web.Request, handler):
+    if request.method == "OPTIONS":
+        return web.Response(
+            headers={
+                "Access-Control-Allow-Origin": "*",
+                "Access-Control-Allow-Methods": "POST",
+                "Access-Control-Allow-Headers": "Content-Type",
+            }
+        )
+    response = await handler(request)
+    response.headers["Access-Control-Allow-Origin"] = "*"
+    return response
+
+
 def build_aiohttp_app(
     client: ClaudeClient,
     secret: str | None,
     personal_org_id: str | None,
 ) -> web.Application:
-    app = web.Application()
+    middlewares = [_cors_middleware] if secret is not None else []
+    app = web.Application(middlewares=middlewares)
     app["claude_client"] = client
     app["token_update_secret"] = secret
     app["personal_org_id"] = personal_org_id
