@@ -18,6 +18,9 @@ async def _handle_update_token(request: web.Request) -> web.Response:
     except Exception:
         return web.json_response({"error": "invalid JSON"}, status=400)
 
+    if not isinstance(body, dict):
+        return web.json_response({"error": "JSON body must be an object"}, status=400)
+
     if secret is not None and body.get("secret") != secret:
         return web.json_response({"error": "forbidden"}, status=403)
 
