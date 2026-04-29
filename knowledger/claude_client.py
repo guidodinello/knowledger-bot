@@ -88,6 +88,11 @@ class ClaudeClient:
     def invalidate_projects(self) -> None:
         self.__dict__.pop("projects", None)
 
+    def update_token(self, session_token: str) -> None:
+        self._cookie = f"sessionKey={session_token}"
+        self.__dict__.pop("_org_id", None)
+        self.__dict__.pop("projects", None)
+
     def list_docs(self, project_id: str) -> list[Doc]:
         response = requests.get(
             f"{BASE_URL}/organizations/{self._org_id}/projects/{project_id}/docs",
