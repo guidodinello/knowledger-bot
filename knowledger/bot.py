@@ -16,7 +16,7 @@ from telegram.ext import (
 )
 from telegram.helpers import escape_markdown
 
-from .claude_client import AuthError, ClaudeClient, Doc, Project
+from .claude_client import AuthError, ClaudeClient, Doc, Project, get_org_id_for_token
 from .config import Config
 from .logger import get_logger
 from .queue import Queue, QueueEntry
@@ -111,12 +111,10 @@ async def cmd_refresh(update: Update, context: CustomContext) -> None:
         await update.message.reply_text(f"Auth error: {e}")
         return
 
-    await _drain_and_retry_queue(update, context)
+    await _drain_and_retry_queue(update.effective_chat.id, context)
 
 
-async def _drain_and_retry_queue(update: Update, context: CustomContext) -> None:
-    if update.message is None:
-        return
+async def _drain_and_retry_queue(chat_id: int, context: CustomContext) -> None:
     entries = context.bot_data["queue"].drain()
     if not entries:
         return
@@ -157,7 +155,7 @@ async def _drain_and_retry_queue(update: Update, context: CustomContext) -> None
         summary += f" {len(failed)} failed and re-queued."
     if could_not_reenqueue:
         summary += f" Warning: {len(could_not_reenqueue)} could not be re-queued (storage error)."
-    await update.message.reply_text(summary)
+    await context.bot.send_message(chat_id, summary)
 
 
 @_require_auth
@@ -380,6 +378,39 @@ async def handle_duplicate_choice(update: Update, context: CustomContext) -> Non
     )
 
 
+@_require_auth
+async def cmd_update_token(update: Update, context: CustomContext) -> None:
+    if update.message is None:
+        return
+    if not context.args:
+        await update.message.reply_text(
+            "Usage: /update_token <sessionKey>\n"
+            "Get it from claude.ai → DevTools → Storage → Cookies → sessionKey."
+        )
+        return
+    new_token = context.args[0].strip()
+    try:
+        await asyncio.to_thread(get_org_id_for_token, new_token)
+    except AuthError:
+        await update.message.reply_text("Token is invalid or expired — not updated.")
+        return
+    except Exception:
+        logger.exception("Token validation failed")
+        await update.message.reply_text("Could not validate token — not updated.")
+        return
+    try:
+        await update.message.delete()
+    except Exception:
+        logger.warning("Could not delete /update_token message", exc_info=True)
+        await context.bot.send_message(
+            update.effective_chat.id,
+            "Warning: could not delete your message — please delete it manually to protect your token.",
+        )
+    context.bot_data["claude_client"].update_token(new_token)
+    await context.bot.send_message(update.effective_chat.id, "Token updated.")
+    await _drain_and_retry_queue(update.effective_chat.id, context)
+
+
 def build_application(config: Config) -> Application:
     app = (
         Application.builder()
@@ -394,6 +425,7 @@ def build_application(config: Config) -> Application:
     app.add_handler(CommandHandler("start", cmd_start))
     app.add_handler(CommandHandler("help", cmd_help))
     app.add_handler(CommandHandler("refresh", cmd_refresh))
+    app.add_handler(CommandHandler("update_token", cmd_update_token))
     app.add_handler(
         MessageHandler(filters.TEXT & filters.Regex(YOUTUBE_URL_PATTERN), handle_youtube_url)
     )

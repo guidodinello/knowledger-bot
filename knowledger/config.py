@@ -21,6 +21,9 @@ class Config:
     allowed_user_ids: frozenset[int]
     project_whitelist: frozenset[str] = frozenset()
     proxy: ProxyConfig | None = None
+    token_update_secret: str | None = None
+    token_server_port: int | None = None
+    personal_org_id: str | None = None
 
 
 def load_config() -> Config:
@@ -54,10 +57,23 @@ def load_config() -> Config:
         ProxyConfig(proxy_username, proxy_password) if proxy_username and proxy_password else None
     )
 
+    token_update_secret = os.getenv("TOKEN_UPDATE_SECRET") or None
+    raw_port = os.getenv("TOKEN_SERVER_PORT")
+    token_server_port: int | None = None
+    if raw_port:
+        try:
+            token_server_port = int(raw_port)
+        except ValueError as e:
+            raise ValueError("TOKEN_SERVER_PORT must be an integer") from e
+    personal_org_id = os.getenv("PERSONAL_ORG_ID") or None
+
     return Config(
         telegram_bot_token=token,
         claude_session_token=session,
         allowed_user_ids=allowed,
         project_whitelist=whitelist,
         proxy=proxy,
+        token_update_secret=token_update_secret,
+        token_server_port=token_server_port,
+        personal_org_id=personal_org_id,
     )

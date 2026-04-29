@@ -88,6 +88,11 @@ class ClaudeClient:
     def invalidate_projects(self) -> None:
         self.__dict__.pop("projects", None)
 
+    def update_token(self, session_token: str) -> None:
+        self._cookie = f"sessionKey={session_token}"
+        self.__dict__.pop("_org_id", None)
+        self.__dict__.pop("projects", None)
+
     def list_docs(self, project_id: str) -> list[Doc]:
         response = requests.get(
             f"{BASE_URL}/organizations/{self._org_id}/projects/{project_id}/docs",
@@ -124,3 +129,8 @@ class ClaudeClient:
             response.raise_for_status()
 
         return response.json()
+
+
+def get_org_id_for_token(token: str) -> str:
+    """Return the org UUID for a session token. Raises AuthError if the token is invalid."""
+    return ClaudeClient(token)._org_id

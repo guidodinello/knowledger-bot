@@ -9,6 +9,7 @@ dependencies = [
     "youtube-transcript-api>=1.0.0",
     "curl-cffi>=0.7.0",
     "python-dotenv>=1.0.0",
+    "aiohttp>=3.9",
 ]
 
 [dependency-groups]
