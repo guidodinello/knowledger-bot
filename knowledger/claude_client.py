@@ -93,6 +93,11 @@ class ClaudeClient:
         self.__dict__.pop("_org_id", None)
         self.__dict__.pop("projects", None)
 
+
+def get_org_id_for_token(token: str) -> str:
+    """Return the org UUID for a session token. Raises AuthError if the token is invalid."""
+    return ClaudeClient(token)._org_id
+
     def list_docs(self, project_id: str) -> list[Doc]:
         response = requests.get(
             f"{BASE_URL}/organizations/{self._org_id}/projects/{project_id}/docs",

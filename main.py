@@ -1,3 +1,4 @@
+import asyncio
 from datetime import date
 from pathlib import Path
 
@@ -6,15 +7,48 @@ from knowledger.config import load_config
 from knowledger.logger import get_logger, init_logging
 
 init_logging(Path(f"knowledger_{date.today()}.log"))
-
 logger = get_logger(__name__)
 
 
-def main() -> None:
+async def _run_polling(app) -> None:
+    async with app:
+        await app.updater.start_polling()
+        await app.start()
+        try:
+            await asyncio.Event().wait()
+        finally:
+            await app.updater.stop()
+            await app.stop()
+
+
+async def main_async() -> None:
     config = load_config()
     logger.info("Starting knowledger bot")
     app = build_application(config)
-    app.run_polling()
+    tasks = [asyncio.create_task(_run_polling(app))]
+
+    if config.token_server_port is not None:
+        from knowledger.http_server import build_aiohttp_app, run_http_server
+
+        aiohttp_app = build_aiohttp_app(
+            client=app.bot_data["claude_client"],
+            secret=config.token_update_secret,
+            personal_org_id=config.personal_org_id,
+        )
+        tasks.append(asyncio.create_task(run_http_server(aiohttp_app, config.token_server_port)))
+
+    try:
+        await asyncio.gather(*tasks)
+    except (KeyboardInterrupt, SystemExit):
+        pass
+    finally:
+        for t in tasks:
+            t.cancel()
+        await asyncio.gather(*tasks, return_exceptions=True)
+
+
+def main() -> None:
+    asyncio.run(main_async())
 
 
 if __name__ == "__main__":
