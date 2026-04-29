@@ -1,4 +1,5 @@
 import asyncio
+import signal
 from datetime import date
 from pathlib import Path
 
@@ -37,14 +38,17 @@ async def main_async() -> None:
         )
         tasks.append(asyncio.create_task(run_http_server(aiohttp_app, config.token_server_port)))
 
-    try:
-        await asyncio.gather(*tasks)
-    except (KeyboardInterrupt, SystemExit):
-        pass
-    finally:
+    loop = asyncio.get_running_loop()
+
+    def _shutdown():
+        logger.info("Shutdown signal received, stopping...")
         for t in tasks:
             t.cancel()
-        await asyncio.gather(*tasks, return_exceptions=True)
+
+    for sig in (signal.SIGTERM, signal.SIGINT):
+        loop.add_signal_handler(sig, _shutdown)
+
+    await asyncio.gather(*tasks, return_exceptions=True)
 
 
 def main() -> None:

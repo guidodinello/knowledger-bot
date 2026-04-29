@@ -21,9 +21,10 @@ async def _handle_update_token(request: web.Request) -> web.Response:
     if secret is not None and body.get("secret") != secret:
         return web.json_response({"error": "forbidden"}, status=403)
 
-    new_token = body.get("token", "").strip()
-    if not new_token:
-        return web.json_response({"error": "'token' is required"}, status=400)
+    raw_token = body.get("token")
+    if not isinstance(raw_token, str) or not raw_token.strip():
+        return web.json_response({"error": "'token' must be a non-empty string"}, status=400)
+    new_token = raw_token.strip()
 
     if personal_org_id is not None:
         try:

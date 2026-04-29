@@ -58,7 +58,7 @@ def load_config() -> Config:
     )
 
     token_update_secret = os.getenv("TOKEN_UPDATE_SECRET") or None
-    raw_port = os.getenv("TOKEN_SERVER_PORT") or os.getenv("PORT")
+    raw_port = os.getenv("TOKEN_SERVER_PORT")
     token_server_port: int | None = None
     if raw_port:
         try:
