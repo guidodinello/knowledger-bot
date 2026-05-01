@@ -5,6 +5,7 @@ from dataclasses import dataclass
 from urllib.parse import parse_qs, urlparse
 
 from curl_cffi import requests
+from curl_cffi.requests.exceptions import RequestException
 
 logger = logging.getLogger(__name__)
 
@@ -64,8 +65,8 @@ def fetch_video_metadata(url: str) -> VideoMetadata:
 
     try:
         title = _fetch_page_title(video_id) or data["title"]
-    except Exception:
-        logger.debug("Could not fetch full page title for %s, using oEmbed title", video_id)
+    except (RequestException, ValueError):
+        logger.exception("Could not fetch full page title for %s, using oEmbed title", video_id)
         title = data["title"]
 
     return VideoMetadata(
