@@ -69,8 +69,12 @@ def _try_instances(video_id: str, instances: list[str]) -> str | None:
                 continue
             en_track = next((t for t in tracks if "en" in t.get("languageCode", "").lower()), None)
             track = en_track if en_track is not None else tracks[0]
+            track_url = track.get("url", "")
+            if not track_url.startswith("/"):
+                logger.warning("Unexpected non-relative track URL from %s: %s", instance, track_url)
+                continue
             vtt_resp = curl_requests.get(
-                f"{instance}{track['url']}",
+                f"{instance}{track_url}",
                 impersonate="chrome110",
                 timeout=10,
             )
