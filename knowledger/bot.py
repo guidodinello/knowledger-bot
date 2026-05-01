@@ -173,6 +173,7 @@ async def handle_youtube_url(update: Update, context: CustomContext) -> None:
         await update.message.reply_text("Couldn't parse a video ID from that URL.")
         return
 
+    logger.info("New request from user %s: %s", update.effective_user.id, url)
     await update.message.reply_text("Fetching video info...")
 
     try:
@@ -286,6 +287,7 @@ async def handle_project_selection(update: Update, context: CustomContext) -> No
 
     await query.edit_message_text("Fetching transcript...")
 
+    logger.info("Fetching transcript for %s", file_name)
     transcript = await asyncio.to_thread(
         fetch_transcript,
         metadata.video_id,
@@ -299,6 +301,7 @@ async def handle_project_selection(update: Update, context: CustomContext) -> No
         )
         return
 
+    logger.info("Uploading %s to project %s", file_name, project_id)
     try:
         await asyncio.to_thread(
             context.bot_data["claude_client"].upload_content, project_id, transcript, file_name
@@ -337,6 +340,7 @@ async def handle_project_selection(update: Update, context: CustomContext) -> No
 
     context.user_data.pop(f"video_{msg_id_str}", None)
 
+    logger.info("Upload complete: %s -> project %s", file_name, project_id)
     await query.edit_message_text(
         f"Saved *{escape_markdown(file_name, version=1)}* to project.", parse_mode="Markdown"
     )
@@ -375,6 +379,7 @@ async def handle_duplicate_choice(update: Update, context: CustomContext) -> Non
 
     await query.edit_message_text("Fetching transcript...")
 
+    logger.info("Fetching transcript for overwrite: %s", pending["file_name"])
     transcript = await asyncio.to_thread(
         fetch_transcript,
         pending["video_id"],
@@ -388,6 +393,7 @@ async def handle_duplicate_choice(update: Update, context: CustomContext) -> Non
         )
         return
 
+    logger.info("Overwriting %s in project %s", pending["file_name"], pending["project_id"])
     await query.edit_message_text("Overwriting...")
 
     try:
@@ -411,6 +417,7 @@ async def handle_duplicate_choice(update: Update, context: CustomContext) -> Non
     context.user_data.pop(f"video_{msg_id_str}", None)
     context.user_data.pop(f"pending_{msg_id_str}", None)
 
+    logger.info("Overwrite complete: %s -> project %s", pending["file_name"], pending["project_id"])
     await query.edit_message_text(
         f"Saved *{escape_markdown(pending['file_name'], version=1)}* to project.",
         parse_mode="Markdown",
