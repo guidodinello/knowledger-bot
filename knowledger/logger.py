@@ -3,6 +3,17 @@ import sys
 from logging.handlers import RotatingFileHandler
 from pathlib import Path
 
+_SUPPRESSED_SUBSTRINGS = ("getUpdates",)
+
+
+class _HttpxFilter(logging.Filter):
+    def filter(self, record: logging.LogRecord) -> bool:
+        if record.levelno == logging.INFO:
+            msg = record.getMessage()
+            if any(s in msg for s in _SUPPRESSED_SUBSTRINGS):
+                return False
+        return True
+
 
 def init_logging(file: Path, level: str) -> None:
     root = logging.getLogger()
@@ -21,6 +32,8 @@ def init_logging(file: Path, level: str) -> None:
     root.addHandler(fh)
 
     root.setLevel(level.upper())
+
+    logging.getLogger("httpx").addFilter(_HttpxFilter())
 
 
 def get_logger(name: str) -> logging.Logger:
