@@ -24,12 +24,16 @@ async def main_async(config: Config) -> None:
     tasks = [asyncio.create_task(_run_polling(app))]
 
     if config.token_server_port is not None:
+        if config.token_update_secret is None:
+            raise ValueError("TOKEN_UPDATE_SECRET must be set when TOKEN_SERVER_PORT is configured")
+
         from knowledger.http_server import build_aiohttp_app, run_http_server
 
         aiohttp_app = build_aiohttp_app(
             client=app.bot_data["claude_client"],
             secret=config.token_update_secret,
             personal_org_id=config.personal_org_id,
+            cors_allowed_origin=config.cors_allowed_origin,
         )
         tasks.append(asyncio.create_task(run_http_server(aiohttp_app, config.token_server_port)))
 

@@ -1,4 +1,5 @@
 import asyncio
+import hmac
 
 from aiohttp import web
 from aiohttp.web_middlewares import middleware
@@ -10,7 +11,7 @@ logger = get_logger(__name__)
 
 
 async def _handle_update_token(request: web.Request) -> web.Response:
-    secret: str | None = request.app["token_update_secret"]
+    secret: str = request.app["token_update_secret"]
     client: ClaudeClient = request.app["claude_client"]
     personal_org_id: str | None = request.app["personal_org_id"]
 
@@ -22,7 +23,7 @@ async def _handle_update_token(request: web.Request) -> web.Response:
     if not isinstance(body, dict):
         return web.json_response({"error": "JSON body must be an object"}, status=400)
 
-    if secret is not None and body.get("secret") != secret:
+    if not hmac.compare_digest(body.get("secret", ""), secret):
         return web.json_response({"error": "forbidden"}, status=403)
 
     raw_token = body.get("token")
@@ -47,27 +48,31 @@ async def _handle_update_token(request: web.Request) -> web.Response:
     return web.json_response({"status": "ok"})
 
 
-@middleware
-async def _cors_middleware(request: web.Request, handler):
-    if request.method == "OPTIONS":
-        return web.Response(
-            headers={
-                "Access-Control-Allow-Origin": "*",
-                "Access-Control-Allow-Methods": "POST",
-                "Access-Control-Allow-Headers": "Content-Type",
-            }
-        )
-    response = await handler(request)
-    response.headers["Access-Control-Allow-Origin"] = "*"
-    return response
+def _make_cors_middleware(allowed_origin: str):
+    @middleware
+    async def _cors_middleware(request: web.Request, handler):
+        if request.method == "OPTIONS":
+            return web.Response(
+                headers={
+                    "Access-Control-Allow-Origin": allowed_origin,
+                    "Access-Control-Allow-Methods": "POST",
+                    "Access-Control-Allow-Headers": "Content-Type",
+                }
+            )
+        response = await handler(request)
+        response.headers["Access-Control-Allow-Origin"] = allowed_origin
+        return response
+
+    return _cors_middleware
 
 
 def build_aiohttp_app(
     client: ClaudeClient,
-    secret: str | None,
+    secret: str,
     personal_org_id: str | None,
+    cors_allowed_origin: str = "*",
 ) -> web.Application:
-    app = web.Application(middlewares=[_cors_middleware])
+    app = web.Application(middlewares=[_make_cors_middleware(cors_allowed_origin)])
     app["claude_client"] = client
     app["token_update_secret"] = secret
     app["personal_org_id"] = personal_org_id
@@ -81,8 +86,6 @@ async def run_http_server(aiohttp_app: web.Application, port: int) -> None:
     await runner.setup()
     await web.TCPSite(runner, "0.0.0.0", port).start()
     logger.info("Token update server listening on port %d", port)
-    if aiohttp_app["token_update_secret"] is None:
-        logger.warning("TOKEN_UPDATE_SECRET not set — /update-token is unauthenticated")
     try:
         await asyncio.Event().wait()
     finally:
