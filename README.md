@@ -48,21 +48,18 @@ Send the bot a YouTube URL. It will show your Claude projects as buttons — tap
 | `/start` | Welcome message |
 | `/help` | Show help |
 | `/refresh` | Reload Claude project list |
-| `/update_token <sessionKey>` | Hot-swap the Claude session token without restarting |
 
 ## Token management
 
-The Claude session token is a `sessionKey` cookie from claude.ai. It gets invalidated when you log out (e.g. to switch accounts). There are two ways to update it without restarting the bot:
-
-**Via Telegram** — send `/update_token <sessionKey>` from any device. The message is deleted immediately after processing. Any queued uploads are retried automatically.
-
-**Via HTTP endpoint** — set `TOKEN_SERVER_PORT` to enable a `POST /update-token` endpoint. Intended for automated flows like the [Chrome extension](docs/features/chrome-extension-spec.md), which updates the token silently whenever you log back into your personal Claude account on desktop.
+The Claude session token is a `sessionKey` cookie from claude.ai. It gets invalidated when you log out (e.g. to switch accounts). Update it without restarting via the HTTP endpoint: set `TOKEN_SERVER_PORT` and `TOKEN_UPDATE_SECRET` to enable a `POST /update-token` endpoint. Intended for automated flows like the [Chrome extension](docs/features/chrome-extension-spec.md), which updates the token silently whenever you log back into your personal Claude account on desktop.
 
 ```bash
 curl -X POST http://localhost:8080/update-token \
   -H 'Content-Type: application/json' \
   -d '{"token": "sk-ant-sid01-...", "secret": "your-secret"}'
 ```
+
+Any queued uploads are retried automatically after a successful token update.
 
 ### Environment variables
 
@@ -73,7 +70,8 @@ curl -X POST http://localhost:8080/update-token \
 | `ALLOWED_USER_IDS` | Yes | Comma-separated Telegram user IDs |
 | `PROJECT_WHITELIST` | No | Comma-separated project names to show (shows all if unset) |
 | `TOKEN_SERVER_PORT` | No | Port for the HTTP token update endpoint (disabled if unset) |
-| `TOKEN_UPDATE_SECRET` | No | Shared secret to protect the HTTP endpoint |
+| `TOKEN_UPDATE_SECRET` | If `TOKEN_SERVER_PORT` is set | Shared secret to protect the HTTP endpoint |
+| `CORS_ALLOWED_ORIGIN` | No | Allowed CORS origin for the HTTP endpoint (e.g. `chrome-extension://<id>`); defaults to `*` |
 | `PERSONAL_ORG_ID` | No | Claude org UUID; if set, the HTTP endpoint rejects tokens from other accounts (prevents work-account tokens from being accepted) |
 
 To find your `PERSONAL_ORG_ID`: while logged into your personal claude.ai account, visit `https://claude.ai/api/organizations` — grab the `uuid` from the entry with `"claude_pro"` in its `capabilities`.
@@ -82,4 +80,4 @@ To find your `PERSONAL_ORG_ID`: while logged into your personal claude.ai accoun
 
 - The project list is cached at startup; use `/refresh` to pick up new projects without restarting.
 - Videos without captions will report "no transcript available".
-- Failed uploads (e.g. due to an expired token) are queued and retried automatically after a successful `/update_token` or `/refresh`.
+- Failed uploads (e.g. due to an expired token) are queued and retried automatically after a successful token update.
