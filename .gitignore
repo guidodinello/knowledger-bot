@@ -15,3 +15,5 @@ wheels/
 deploy.env
 .vscode/
 docs/improvements/
+
+cookies.txt
