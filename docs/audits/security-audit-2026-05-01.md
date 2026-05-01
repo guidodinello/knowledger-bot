@@ -173,6 +173,23 @@ Whether the HTTP endpoint is reachable from the public internet depends on the d
 
 ---
 
+## Remediation Status
+
+**Closed:** 2026-05-01
+
+| Finding | Severity | Status | Notes |
+|---|---|---|---|
+| H-1 | HIGH | Fixed | `TOKEN_UPDATE_SECRET` now required at startup when `TOKEN_SERVER_PORT` is set; `build_aiohttp_app` takes `secret: str`; unconditional auth check |
+| M-1 | MEDIUM | Fixed | `CORS_ALLOWED_ORIGIN` env var controls the allowed origin; defaults to `*` with a documented upgrade path to `chrome-extension://<id>` |
+| M-2 | MEDIUM | Fixed | `/update_token` Telegram command removed entirely; HTTP endpoint is now the only token update path |
+| M-3 | MEDIUM | Fixed | Replaced `!=` with `hmac.compare_digest` |
+| M-4 | MEDIUM | Fixed | Invidious track URL validated to start with `/` before concatenation; unexpected URLs are logged and skipped |
+| L-1 | LOW | Accepted | Railway terminates TLS on the public `*.railway.app` domain — no code change needed for current deployment |
+| L-2 | LOW | Accepted | HTTP endpoint is auth-gated by a required secret; single-user deployment makes resource exhaustion a negligible risk |
+| L-3 | LOW | Fixed | `@_require_auth` applied directly to `cmd_help` |
+
+---
+
 ## Sources
 
 - [OWASP Authentication Cheat Sheet](https://cheatsheetseries.owasp.org/cheatsheets/Authentication_Cheat_Sheet.html)
