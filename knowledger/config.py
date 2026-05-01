@@ -1,5 +1,7 @@
 import os
-from dataclasses import dataclass
+from dataclasses import dataclass, field
+from datetime import date
+from pathlib import Path
 
 from dotenv import load_dotenv
 
@@ -15,7 +17,14 @@ class ProxyConfig:
 
 
 @dataclass(frozen=True, slots=True)
+class LoggerConfig:
+    level: str = "INFO"
+    file: Path = field(default_factory=lambda: Path(f"knowledger_{date.today()}.log"))
+
+
+@dataclass(frozen=True, slots=True)
 class Config:
+    logger: LoggerConfig
     telegram_bot_token: str
     claude_session_token: str
     allowed_user_ids: frozenset[int]
@@ -28,6 +37,7 @@ class Config:
 
 def load_config() -> Config:
     load_dotenv(override=True)
+
     token = os.getenv("TELEGRAM_BOT_TOKEN")
     if not token:
         raise ValueError("TELEGRAM_BOT_TOKEN is required")
@@ -49,15 +59,10 @@ def load_config() -> Config:
         raise ValueError("ALLOWED_USER_IDS must contain at least one user ID")
 
     raw_whitelist = os.getenv("PROJECT_WHITELIST", "")
-    whitelist = frozenset(name.strip() for name in raw_whitelist.split(",") if name.strip())
 
     proxy_username = os.getenv("WEBSHARE_PROXY_USERNAME")
     proxy_password = os.getenv("WEBSHARE_PROXY_PASSWORD")
-    proxy = (
-        ProxyConfig(proxy_username, proxy_password) if proxy_username and proxy_password else None
-    )
 
-    token_update_secret = os.getenv("TOKEN_UPDATE_SECRET") or None
     raw_port = os.getenv("TOKEN_SERVER_PORT")
     token_server_port: int | None = None
     if raw_port:
@@ -65,15 +70,26 @@ def load_config() -> Config:
             token_server_port = int(raw_port)
         except ValueError as e:
             raise ValueError("TOKEN_SERVER_PORT must be an integer") from e
-    personal_org_id = os.getenv("PERSONAL_ORG_ID") or None
+
+    raw_log_file = os.getenv("LOG_FILE")
 
     return Config(
         telegram_bot_token=token,
         claude_session_token=session,
         allowed_user_ids=allowed,
-        project_whitelist=whitelist,
-        proxy=proxy,
-        token_update_secret=token_update_secret,
+        project_whitelist=frozenset(
+            name.strip() for name in raw_whitelist.split(",") if name.strip()
+        ),
+        proxy=(
+            ProxyConfig(proxy_username, proxy_password)
+            if proxy_username and proxy_password
+            else None
+        ),
+        token_update_secret=os.getenv("TOKEN_UPDATE_SECRET") or None,
         token_server_port=token_server_port,
-        personal_org_id=personal_org_id,
+        personal_org_id=os.getenv("PERSONAL_ORG_ID") or None,
+        logger=LoggerConfig(
+            level=os.getenv("LOG_LEVEL", "INFO").upper(),
+            file=Path(raw_log_file) if raw_log_file else Path(f"knowledger_{date.today()}.log"),
+        ),
     )

@@ -110,6 +110,10 @@ async def cmd_refresh(update: Update, context: CustomContext) -> None:
     except AuthError as e:
         await update.message.reply_text(f"Auth error: {e}")
         return
+    except Exception as e:
+        logger.exception("Failed to refresh project list")
+        await update.message.reply_text(f"Refresh failed: {e}")
+        return
 
     await _drain_and_retry_queue(update.effective_chat.id, context)
 
@@ -171,7 +175,7 @@ async def handle_youtube_url(update: Update, context: CustomContext) -> None:
     await update.message.reply_text("Fetching video info...")
 
     try:
-        metadata = fetch_video_metadata(url)
+        metadata = await asyncio.to_thread(fetch_video_metadata, url)
     except (RequestException, ValueError) as e:
         logger.exception("Failed to fetch metadata for %s", url)
         await update.message.reply_text(f"Failed to fetch video info: {e}")
@@ -193,8 +197,10 @@ async def handle_youtube_url(update: Update, context: CustomContext) -> None:
 
     keyboard = _build_keyboard(projects, msg_id, context.bot_data["config"].project_whitelist)
 
+    safe_title = escape_markdown(metadata.title, version=1)
+    safe_channel = escape_markdown(metadata.channel_name, version=1)
     await update.message.reply_text(
-        f"*{metadata.title}*\n_{metadata.channel_name}_\n\nSelect a project:",
+        f"*{safe_title}*\n_{safe_channel}_\n\nSelect a project:",
         parse_mode="Markdown",
         reply_markup=keyboard,
     )
@@ -238,10 +244,13 @@ async def handle_project_selection(update: Update, context: CustomContext) -> No
 
     await query.edit_message_text("Fetching transcript...")
 
-    transcript = fetch_transcript(metadata.video_id, proxy=context.bot_data["config"].proxy)
+    transcript = await asyncio.to_thread(
+        fetch_transcript, metadata.video_id, proxy=context.bot_data["config"].proxy
+    )
     if transcript is None:
         await query.edit_message_text(
-            f"No captions available for *{metadata.title}*.", parse_mode="Markdown"
+            f"No captions available for *{escape_markdown(metadata.title, version=1)}*.",
+            parse_mode="Markdown",
         )
         return
 
@@ -250,7 +259,9 @@ async def handle_project_selection(update: Update, context: CustomContext) -> No
     file_name = f"Youtube - {channel} - {title}"
 
     try:
-        docs: list[Doc] = context.bot_data["claude_client"].list_docs(project_id)
+        docs: list[Doc] = await asyncio.to_thread(
+            context.bot_data["claude_client"].list_docs, project_id
+        )
     except AuthError as e:
         await query.edit_message_text(f"Auth error: {e}")
         return
@@ -283,7 +294,9 @@ async def handle_project_selection(update: Update, context: CustomContext) -> No
         return
 
     try:
-        context.bot_data["claude_client"].upload_content(project_id, transcript, file_name)
+        await asyncio.to_thread(
+            context.bot_data["claude_client"].upload_content, project_id, transcript, file_name
+        )
     except AuthError:
         if update.effective_chat is None:
             return
@@ -357,9 +370,14 @@ async def handle_duplicate_choice(update: Update, context: CustomContext) -> Non
     await query.edit_message_text("Overwriting...")
 
     try:
-        context.bot_data["claude_client"].delete_doc(pending["project_id"], doc_uuid)
-        context.bot_data["claude_client"].upload_content(
-            pending["project_id"], pending["transcript"], pending["file_name"]
+        await asyncio.to_thread(
+            context.bot_data["claude_client"].delete_doc, pending["project_id"], doc_uuid
+        )
+        await asyncio.to_thread(
+            context.bot_data["claude_client"].upload_content,
+            pending["project_id"],
+            pending["transcript"],
+            pending["file_name"],
         )
     except AuthError as e:
         await query.edit_message_text(f"Auth error: {e}")
@@ -404,7 +422,8 @@ async def cmd_update_token(update: Update, context: CustomContext) -> None:
         logger.warning("Could not delete /update_token message", exc_info=True)
         await context.bot.send_message(
             update.effective_chat.id,
-            "Warning: could not delete your message — please delete it manually to protect your token.",
+            "Warning: could not delete your message — "
+            "please delete it manually to protect your token.",
         )
     context.bot_data["claude_client"].update_token(new_token)
     await context.bot.send_message(update.effective_chat.id, "Token updated.")

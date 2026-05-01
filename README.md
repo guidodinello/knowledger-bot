@@ -74,9 +74,9 @@ curl -X POST http://localhost:8080/update-token \
 | `PROJECT_WHITELIST` | No | Comma-separated project names to show (shows all if unset) |
 | `TOKEN_SERVER_PORT` | No | Port for the HTTP token update endpoint (disabled if unset) |
 | `TOKEN_UPDATE_SECRET` | No | Shared secret to protect the HTTP endpoint |
-| `PERSONAL_ORG_ID` | No | Claude org UUID; if set, the HTTP endpoint rejects tokens from other accounts |
+| `PERSONAL_ORG_ID` | No | Claude org UUID; if set, the HTTP endpoint rejects tokens from other accounts (prevents work-account tokens from being accepted) |
 
-To find your `PERSONAL_ORG_ID`: open claude.ai while logged in, check the network requests in DevTools — it appears in URLs like `/api/organizations/<uuid>/projects`.
+To find your `PERSONAL_ORG_ID`: while logged into your personal claude.ai account, visit `https://claude.ai/api/organizations` — grab the `uuid` from the entry with `"claude_pro"` in its `capabilities`.
 
 ## Notes
 

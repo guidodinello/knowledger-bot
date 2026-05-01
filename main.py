@@ -1,14 +1,9 @@
 import asyncio
 import signal
-from datetime import date
-from pathlib import Path
 
 from knowledger.bot import build_application
-from knowledger.config import load_config
+from knowledger.config import Config, load_config
 from knowledger.logger import get_logger, init_logging
-
-init_logging(Path(f"knowledger_{date.today()}.log"))
-logger = get_logger(__name__)
 
 
 async def _run_polling(app) -> None:
@@ -22,8 +17,8 @@ async def _run_polling(app) -> None:
             await app.stop()
 
 
-async def main_async() -> None:
-    config = load_config()
+async def main_async(config: Config) -> None:
+    logger = get_logger(__name__)
     logger.info("Starting knowledger bot")
     app = build_application(config)
     tasks = [asyncio.create_task(_run_polling(app))]
@@ -52,7 +47,9 @@ async def main_async() -> None:
 
 
 def main() -> None:
-    asyncio.run(main_async())
+    config = load_config()
+    init_logging(file=config.logger.file, level=config.logger.level)
+    asyncio.run(main_async(config))
 
 
 if __name__ == "__main__":

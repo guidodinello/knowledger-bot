@@ -67,12 +67,12 @@ def build_aiohttp_app(
     secret: str | None,
     personal_org_id: str | None,
 ) -> web.Application:
-    middlewares = [_cors_middleware] if secret is not None else []
-    app = web.Application(middlewares=middlewares)
+    app = web.Application(middlewares=[_cors_middleware])
     app["claude_client"] = client
     app["token_update_secret"] = secret
     app["personal_org_id"] = personal_org_id
     app.router.add_post("/update-token", _handle_update_token)
+    app.router.add_route("OPTIONS", "/update-token", _handle_update_token)
     return app
 
 
