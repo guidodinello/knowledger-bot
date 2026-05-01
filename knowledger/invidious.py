@@ -27,6 +27,8 @@ def _parse_vtt(vtt: str) -> str:
             continue
         if stripped.startswith(("WEBVTT", "Kind:", "Language:", "NOTE")):
             continue
+        if stripped.isdigit():
+            continue
         if _TIMESTAMP_RE.search(stripped):
             continue
         if lines and lines[-1] == stripped:
