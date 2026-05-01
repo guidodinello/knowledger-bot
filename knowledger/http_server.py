@@ -23,7 +23,8 @@ async def _handle_update_token(request: web.Request) -> web.Response:
     if not isinstance(body, dict):
         return web.json_response({"error": "JSON body must be an object"}, status=400)
 
-    if not hmac.compare_digest(body.get("secret", ""), secret):
+    raw_secret = body.get("secret")
+    if not isinstance(raw_secret, str) or not hmac.compare_digest(raw_secret, secret):
         return web.json_response({"error": "forbidden"}, status=403)
 
     raw_token = body.get("token")

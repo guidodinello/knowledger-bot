@@ -20,15 +20,16 @@ async def _run_polling(app) -> None:
 async def main_async(config: Config) -> None:
     logger = get_logger(__name__)
     logger.info("Starting knowledger bot")
+    if config.token_server_port is not None and config.token_update_secret is None:
+        raise ValueError("TOKEN_UPDATE_SECRET must be set when TOKEN_SERVER_PORT is configured")
+
     app = build_application(config)
     tasks = [asyncio.create_task(_run_polling(app))]
 
     if config.token_server_port is not None:
-        if config.token_update_secret is None:
-            raise ValueError("TOKEN_UPDATE_SECRET must be set when TOKEN_SERVER_PORT is configured")
-
         from knowledger.http_server import build_aiohttp_app, run_http_server
 
+        assert config.token_update_secret is not None  # validated above
         aiohttp_app = build_aiohttp_app(
             client=app.bot_data["claude_client"],
             secret=config.token_update_secret,
