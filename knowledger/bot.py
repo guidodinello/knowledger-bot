@@ -35,7 +35,7 @@ class BotData(TypedDict):
 class PendingUpload(TypedDict):
     project_id: str
     file_name: str
-    transcript: str
+    video_id: str
 
 
 CustomContext = CallbackContext[Any, dict, dict, BotData]
@@ -243,21 +243,11 @@ async def handle_project_selection(update: Update, context: CustomContext) -> No
         await query.edit_message_text("Session expired. Please send the URL again.")
         return
 
-    await query.edit_message_text("Fetching transcript...")
-
-    transcript = await asyncio.to_thread(
-        fetch_transcript, metadata.video_id, proxy=context.bot_data["config"].proxy
-    )
-    if transcript is None:
-        await query.edit_message_text(
-            f"No captions available for *{escape_markdown(metadata.title, version=1)}*.",
-            parse_mode="Markdown",
-        )
-        return
-
     channel = sanitize_filename(metadata.channel_name)
     title = sanitize_filename(metadata.title)
     file_name = f"Youtube - {channel} - {title}"
+
+    await query.edit_message_text("Checking project...")
 
     try:
         docs: list[Doc] = await asyncio.to_thread(
@@ -274,7 +264,7 @@ async def handle_project_selection(update: Update, context: CustomContext) -> No
     existing = next((d for d in docs if d["file_name"] == file_name), None)
     if existing:
         context.user_data[f"pending_{msg_id_str}"] = PendingUpload(
-            project_id=project_id, file_name=file_name, transcript=transcript
+            project_id=project_id, file_name=file_name, video_id=metadata.video_id
         )
         keyboard = InlineKeyboardMarkup(
             [
@@ -291,6 +281,21 @@ async def handle_project_selection(update: Update, context: CustomContext) -> No
             f"⚠️ *{safe_name}* already exists in this project.\n\nSkip or overwrite?",
             parse_mode="Markdown",
             reply_markup=keyboard,
+        )
+        return
+
+    await query.edit_message_text("Fetching transcript...")
+
+    transcript = await asyncio.to_thread(
+        fetch_transcript,
+        metadata.video_id,
+        proxy=context.bot_data["config"].proxy,
+        cookies_path=context.bot_data["config"].youtube_cookies_path,
+    )
+    if transcript is None:
+        await query.edit_message_text(
+            f"No captions available for *{escape_markdown(metadata.title, version=1)}*.",
+            parse_mode="Markdown",
         )
         return
 
@@ -368,6 +373,21 @@ async def handle_duplicate_choice(update: Update, context: CustomContext) -> Non
         await query.edit_message_text("Session expired. Please send the URL again.")
         return
 
+    await query.edit_message_text("Fetching transcript...")
+
+    transcript = await asyncio.to_thread(
+        fetch_transcript,
+        pending["video_id"],
+        proxy=context.bot_data["config"].proxy,
+        cookies_path=context.bot_data["config"].youtube_cookies_path,
+    )
+    if transcript is None:
+        await query.edit_message_text(
+            f"No captions available for *{escape_markdown(pending['file_name'], version=1)}*.",
+            parse_mode="Markdown",
+        )
+        return
+
     await query.edit_message_text("Overwriting...")
 
     try:
@@ -377,7 +397,7 @@ async def handle_duplicate_choice(update: Update, context: CustomContext) -> Non
         await asyncio.to_thread(
             context.bot_data["claude_client"].upload_content,
             pending["project_id"],
-            pending["transcript"],
+            transcript,
             pending["file_name"],
         )
     except AuthError as e:
