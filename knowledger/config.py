@@ -30,6 +30,7 @@ class Config:
     allowed_user_ids: frozenset[int]
     project_whitelist: frozenset[str] = frozenset()
     proxy: ProxyConfig | None = None
+    youtube_cookies_path: Path | None = None
     token_update_secret: str | None = None
     token_server_port: int | None = None
     personal_org_id: str | None = None
@@ -85,6 +86,9 @@ def load_config() -> Config:
             ProxyConfig(proxy_username, proxy_password)
             if proxy_username and proxy_password
             else None
+        ),
+        youtube_cookies_path=(
+            Path(raw_cookies) if (raw_cookies := os.getenv("YOUTUBE_COOKIES_PATH")) else None
         ),
         token_update_secret=os.getenv("TOKEN_UPDATE_SECRET") or None,
         token_server_port=token_server_port,
