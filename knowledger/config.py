@@ -35,6 +35,7 @@ class Config:
     token_server_port: int | None = None
     personal_org_id: str | None = None
     cors_allowed_origin: str = "*"
+    telegram_proxy_url: str | None = None
 
 
 def load_config() -> Config:
@@ -94,6 +95,7 @@ def load_config() -> Config:
         token_server_port=token_server_port,
         personal_org_id=os.getenv("PERSONAL_ORG_ID") or None,
         cors_allowed_origin=os.getenv("CORS_ALLOWED_ORIGIN") or "*",
+        telegram_proxy_url=os.getenv("TELEGRAM_PROXY_URL") or None,
         logger=LoggerConfig(
             level=os.getenv("LOG_LEVEL", "INFO").upper(),
             file=Path(raw_log_file) if raw_log_file else Path(f"knowledger_{date.today()}.log"),

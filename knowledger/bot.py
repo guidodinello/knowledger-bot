@@ -5,6 +5,7 @@ from typing import Any, TypedDict
 
 from curl_cffi.requests.exceptions import RequestException
 from telegram import InlineKeyboardButton, InlineKeyboardMarkup, Update
+from telegram.request import HTTPXRequest
 from telegram.ext import (
     Application,
     CallbackContext,
@@ -425,12 +426,10 @@ async def handle_duplicate_choice(update: Update, context: CustomContext) -> Non
 
 
 def build_application(config: Config) -> Application:
-    app = (
-        Application.builder()
-        .token(config.telegram_bot_token)
-        .context_types(ContextTypes(bot_data=BotData))
-        .build()
-    )
+    builder = Application.builder().token(config.telegram_bot_token)
+    if config.telegram_proxy_url:
+        builder = builder.request(HTTPXRequest(proxy=config.telegram_proxy_url))
+    app = builder.context_types(ContextTypes(bot_data=BotData)).build()
     app.bot_data["config"] = config
     app.bot_data["claude_client"] = ClaudeClient(config.claude_session_token)
     app.bot_data["queue"] = Queue()
