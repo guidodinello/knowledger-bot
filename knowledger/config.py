@@ -19,7 +19,7 @@ class ProxyConfig:
 @dataclass(frozen=True, slots=True)
 class LoggerConfig:
     level: str = "INFO"
-    file: Path = field(default_factory=lambda: Path(f"knowledger_{date.today()}.log"))
+    file: Path = field(default_factory=lambda: Path(f"logs/knowledger_{date.today()}.log"))
 
 
 @dataclass(frozen=True, slots=True)
@@ -74,6 +74,11 @@ def load_config() -> Config:
             raise ValueError("TOKEN_SERVER_PORT must be an integer") from e
 
     raw_log_file = os.getenv("LOG_FILE")
+    raw_log_level = os.getenv("LOG_LEVEL")
+    logger_config = LoggerConfig(
+        **({"level": raw_log_level.upper()} if raw_log_level else {}),
+        **({"file": Path(raw_log_file)} if raw_log_file else {}),
+    )
 
     return Config(
         telegram_bot_token=token,
@@ -93,9 +98,6 @@ def load_config() -> Config:
         token_update_secret=os.getenv("TOKEN_UPDATE_SECRET") or None,
         token_server_port=token_server_port,
         personal_org_id=os.getenv("PERSONAL_ORG_ID") or None,
-        cors_allowed_origin=os.getenv("CORS_ALLOWED_ORIGIN") or "*",
-        logger=LoggerConfig(
-            level=os.getenv("LOG_LEVEL", "INFO").upper(),
-            file=Path(raw_log_file) if raw_log_file else Path(f"knowledger_{date.today()}.log"),
-        ),
+        **({"cors_allowed_origin": cors} if (cors := os.getenv("CORS_ALLOWED_ORIGIN")) else {}),
+        logger=logger_config,
     )

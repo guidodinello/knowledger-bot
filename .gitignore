@@ -17,3 +17,7 @@ deploy.env
 docs/improvements/
 
 cookies.txt
+
+*.png
+*.jpg
+*.jpeg
