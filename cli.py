@@ -13,7 +13,13 @@ from knowledger.youtube import extract_video_id, fetch_video_metadata, sanitize_
 
 
 def _pick_project(client: ClaudeClient, name: str | None) -> tuple[str, str]:
-    projects = client.projects
+    try:
+        projects = client.projects
+    except AuthError:
+        raise
+    except Exception as e:
+        print(f"Error fetching projects: {e}", file=sys.stderr)
+        sys.exit(1)
     if not projects:
         print("No Claude projects found.", file=sys.stderr)
         sys.exit(1)
@@ -32,7 +38,11 @@ def _pick_project(client: ClaudeClient, name: str | None) -> tuple[str, str]:
         print(f"  {i}. {p['name']}")
 
     while True:
-        raw = input("\nSelect project number: ").strip()
+        try:
+            raw = input("\nSelect project number: ").strip()
+        except (EOFError, KeyboardInterrupt):
+            print("\nAborted.", file=sys.stderr)
+            sys.exit(1)
         try:
             idx = int(raw) - 1
             if 0 <= idx < len(projects):
@@ -68,6 +78,9 @@ def main() -> None:
         if args.cookies
         else (Path(p) if (p := os.getenv("YOUTUBE_COOKIES_PATH")) else None)
     )
+    if cookies_path is not None and not cookies_path.exists():
+        print(f"Error: cookies file not found: {cookies_path}", file=sys.stderr)
+        sys.exit(1)
 
     client = ClaudeClient(session_token)
 
@@ -88,7 +101,11 @@ def main() -> None:
         sys.exit(1)
 
     print("\nFetching transcript...")
-    transcript = fetch_transcript(video_id, cookies_path=cookies_path)
+    try:
+        transcript = fetch_transcript(video_id, cookies_path=cookies_path)
+    except Exception as e:
+        print(f"Error fetching transcript: {e}", file=sys.stderr)
+        sys.exit(1)
     if transcript is None:
         print("Error: no captions available for this video.", file=sys.stderr)
         sys.exit(1)
