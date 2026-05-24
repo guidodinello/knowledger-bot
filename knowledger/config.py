@@ -12,8 +12,7 @@ logger = get_logger(__name__)
 
 @dataclass(frozen=True, slots=True)
 class ProxyConfig:
-    username: str
-    password: str
+    url: str
 
 
 @dataclass(frozen=True, slots=True)
@@ -62,8 +61,7 @@ def load_config() -> Config:
 
     raw_whitelist = os.getenv("PROJECT_WHITELIST", "")
 
-    proxy_username = os.getenv("WEBSHARE_PROXY_USERNAME")
-    proxy_password = os.getenv("WEBSHARE_PROXY_PASSWORD")
+    proxy_url = os.getenv("YOUTUBE_PROXY_URL")
 
     raw_port = os.getenv("TOKEN_SERVER_PORT")
     token_server_port: int | None = None
@@ -87,11 +85,7 @@ def load_config() -> Config:
         project_whitelist=frozenset(
             name.strip() for name in raw_whitelist.split(",") if name.strip()
         ),
-        proxy=(
-            ProxyConfig(proxy_username, proxy_password)
-            if proxy_username and proxy_password
-            else None
-        ),
+        proxy=ProxyConfig(url=proxy_url) if proxy_url else None,
         youtube_cookies_path=(
             Path(raw_cookies) if (raw_cookies := os.getenv("YOUTUBE_COOKIES_PATH")) else None
         ),

@@ -4,7 +4,7 @@ from pathlib import Path
 import requests
 from youtube_transcript_api import NoTranscriptFound, TranscriptsDisabled, YouTubeTranscriptApi
 from youtube_transcript_api._errors import RequestBlocked
-from youtube_transcript_api.proxies import WebshareProxyConfig
+from youtube_transcript_api.proxies import GenericProxyConfig
 
 from .config import ProxyConfig
 from .logger import get_logger
@@ -27,11 +27,7 @@ def fetch_transcript(
     proxy: ProxyConfig | None = None,
     cookies_path: Path | None = None,
 ) -> str | None:
-    proxy_config = (
-        WebshareProxyConfig(proxy_username=proxy.username, proxy_password=proxy.password)
-        if proxy is not None
-        else None
-    )
+    proxy_config = GenericProxyConfig(http_url=proxy.url) if proxy is not None else None
     try:
         api = YouTubeTranscriptApi(
             proxy_config=proxy_config,

@@ -79,10 +79,10 @@ Keep `.env.oracle` locally, edit it there, and run `./deploy.sh env` to push.
 > original environment. You must `rm -f` the container and recreate it to pick up new
 > values from `--env-file`.
 
-## 9. YouTube IP blocking — known issue
+## 9. YouTube IP blocking — resolved with residential proxy
 
 Oracle Cloud IPs are blocked by YouTube's transcript API (`RequestBlocked` error).
-**This is the main unresolved problem with Oracle Cloud for this bot.**
+**Solved by routing through a residential proxy (Decodo PAYG, ~$4/GB).**
 
 ### What was tried and why it failed
 
@@ -90,22 +90,31 @@ Oracle Cloud IPs are blocked by YouTube's transcript API (`RequestBlocked` error
 |----------|--------|
 | Cloudflare WARP (proxy mode, `socks5://127.0.0.1:40000`) | Routes through Cloudflare datacenter IPs — also blocked by YouTube |
 | Webshare free proxies (`WebshareProxyConfig`) | Free tier uses datacenter IPs — also blocked/rate-limited (429 + Google CAPTCHA redirect) |
+| [iplocate/free-proxy-list](https://github.com/iplocate/free-proxy-list) | Open/datacenter proxies — also blocked |
 
 **Key insight:** YouTube blocks all datacenter/cloud provider IPs. Only **residential** proxies
 (traffic routed through real home ISP connections) reliably bypass this.
 
-### What would actually work
+### Current solution — Decodo residential proxy
 
-- **Webshare Static Residential** (~$6/month, 20 proxies, 250 GB) — wire up via `WebshareProxyConfig`
-  with `WEBSHARE_PROXY_USERNAME` and `WEBSHARE_PROXY_PASSWORD` env vars; the bot already supports this
-- **Any residential SOCKS5 proxy** — set `YOUTUBE_PROXY=socks5://user:pass@host:port` and use
-  `GenericProxyConfig` in `transcript.py`
+- **Provider:** [Decodo](https://decodo.com) — $4/GB PAYG, no subscription, 14-day money-back
+- **Env var:** `YOUTUBE_PROXY_URL=http://user:password@gate.decodo.com:10001`
+- **Integration:** `GenericProxyConfig(http_url=proxy.url)` in `transcript.py`
 
-### Note on Docker networking
+Credentials live in `.env.oracle` (not committed). Sync with `./deploy.sh env`.
 
-When running the bot in Docker with a proxy on the host (e.g. WARP on `127.0.0.1:40000`),
-the container's `127.0.0.1` is not the host's. Use `--network=host` in the `docker run` command
-(already set in `deploy.sh`) so the container shares the host's network namespace.
+**Cheaper alternative for high volume:** [PacketStream](https://packetstream.io) at $1/GB —
+requires contacting sales, no self-serve signup.
+
+### Proxy provider comparison (spiked 2026-05-24)
+
+| Provider | PAYG rate | Free trial | Notes |
+|----------|-----------|-----------|-------|
+| **PacketStream** | $1/GB | Contact sales | Cheapest, no self-serve |
+| **Decodo** ✓ | $4/GB | 3-day, needs CC | Current provider |
+| Webshare residential | $3.50/GB | No | Already integrated in lib |
+| Bright Data | $8/GB | 7-day, needs CC | Largest pool |
+| IPRoyal | $7.35/GB | Vague | Most expensive |
 
 ## 10. Troubleshooting
 
