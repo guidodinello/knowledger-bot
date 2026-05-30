@@ -60,6 +60,8 @@ def fetch_video_metadata(url: str) -> VideoMetadata:
         params={"url": url, "format": "json"},
         impersonate="chrome110",
     )
+    if response.status_code == 401:
+        raise ValueError("This video is private, age-restricted, or unavailable.")
     response.raise_for_status()
     data = response.json()
 
