@@ -177,7 +177,9 @@ async def handle_youtube_url(update: Update, context: CustomContext) -> None:
     await update.message.reply_text("Fetching video info...")
 
     try:
-        metadata = await asyncio.to_thread(fetch_video_metadata, url)
+        metadata = await asyncio.to_thread(
+            fetch_video_metadata, url, context.bot_data["config"].proxy
+        )
     except (RequestException, ValueError) as e:
         logger.exception("Failed to fetch metadata for %s", url)
         await update.message.reply_text(f"Failed to fetch video info: {e}")

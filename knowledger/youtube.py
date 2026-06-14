@@ -7,6 +7,8 @@ from urllib.parse import parse_qs, urlparse
 from curl_cffi import requests
 from curl_cffi.requests.exceptions import RequestException
 
+from .config import ProxyConfig
+
 logger = logging.getLogger(__name__)
 
 OEMBED_URL = "https://www.youtube.com/oembed"
@@ -39,12 +41,16 @@ def extract_video_id(url: str) -> str | None:
     return None
 
 
-def _fetch_page_data(video_id: str) -> tuple[str | None, str | None]:
+def _fetch_page_data(
+    video_id: str, proxy: ProxyConfig | None = None
+) -> tuple[str | None, str | None]:
     """Return (title, upload_date) from the watch page. oEmbed truncates long titles."""
+    proxies = {"http": proxy.url, "https": proxy.url} if proxy else None  # type: ignore[arg-type]
     response = requests.get(
         WATCH_URL,
         params={"v": video_id},
         impersonate="chrome110",
+        proxies=proxies,
     )
     response.raise_for_status()
     title_match = re.search(r'<meta property="og:title" content="([^"]+)"', response.text)
@@ -54,7 +60,7 @@ def _fetch_page_data(video_id: str) -> tuple[str | None, str | None]:
     return title, upload_date
 
 
-def fetch_video_metadata(url: str) -> VideoMetadata:
+def fetch_video_metadata(url: str, proxy: ProxyConfig | None = None) -> VideoMetadata:
     video_id = extract_video_id(url)
     if not video_id:
         raise ValueError(f"Could not extract video ID from URL: {url}")
@@ -70,7 +76,7 @@ def fetch_video_metadata(url: str) -> VideoMetadata:
     data = response.json()
 
     try:
-        page_title, upload_date = _fetch_page_data(video_id)
+        page_title, upload_date = _fetch_page_data(video_id, proxy=proxy)
         title = page_title or data["title"]
     except (RequestException, ValueError):
         logger.exception("Could not fetch full page title for %s, using oEmbed title", video_id)
