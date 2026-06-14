@@ -246,7 +246,8 @@ async def handle_project_selection(update: Update, context: CustomContext) -> No
 
     channel = sanitize_filename(metadata.channel_name)
     title = sanitize_filename(metadata.title)
-    file_name = f"Youtube - {channel} - {title}"
+    date_suffix = f" - {metadata.upload_date}" if metadata.upload_date else ""
+    file_name = f"Youtube - {channel} - {title}{date_suffix}"
 
     await query.edit_message_text("Checking project...")
 
