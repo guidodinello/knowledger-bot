@@ -18,6 +18,7 @@ class VideoMetadata:
     video_id: str
     title: str
     channel_name: str
+    upload_date: str | None
 
 
 def extract_video_id(url: str) -> str | None:
@@ -38,16 +39,19 @@ def extract_video_id(url: str) -> str | None:
     return None
 
 
-def _fetch_page_title(video_id: str) -> str | None:
-    """Fetch full title from og:title meta tag — oEmbed truncates long titles."""
+def _fetch_page_data(video_id: str) -> tuple[str | None, str | None]:
+    """Return (title, upload_date) from the watch page. oEmbed truncates long titles."""
     response = requests.get(
         WATCH_URL,
         params={"v": video_id},
         impersonate="chrome110",
     )
     response.raise_for_status()
-    match = re.search(r'<meta property="og:title" content="([^"]+)"', response.text)
-    return html.unescape(match.group(1)) if match else None
+    title_match = re.search(r'<meta property="og:title" content="([^"]+)"', response.text)
+    title = html.unescape(title_match.group(1)) if title_match else None
+    date_match = re.search(r'"uploadDate"\s*:\s*"(\d{4}-\d{2}-\d{2})', response.text)
+    upload_date = date_match.group(1) if date_match else None
+    return title, upload_date
 
 
 def fetch_video_metadata(url: str) -> VideoMetadata:
@@ -66,15 +70,18 @@ def fetch_video_metadata(url: str) -> VideoMetadata:
     data = response.json()
 
     try:
-        title = _fetch_page_title(video_id) or data["title"]
+        page_title, upload_date = _fetch_page_data(video_id)
+        title = page_title or data["title"]
     except (RequestException, ValueError):
         logger.exception("Could not fetch full page title for %s, using oEmbed title", video_id)
         title = data["title"]
+        upload_date = None
 
     return VideoMetadata(
         video_id=video_id,
         title=title,
         channel_name=data["author_name"],
+        upload_date=upload_date,
     )
 
 
