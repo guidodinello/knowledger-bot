@@ -13,3 +13,4 @@
 | Feature | Summary |
 |-------|---------|
 | [Improver command](improver-command.md) | rough idea, no spec yet |
+| [Instagram Reel support](instagram-reel-support.md) | Capture + transcribe Instagram Reels (not just YouTube). Feasibility: low — no public API for reel captions, scraping is fragile and against ToS. |
