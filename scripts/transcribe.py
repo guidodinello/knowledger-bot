@@ -15,6 +15,7 @@ import sys
 import tempfile
 from pathlib import Path
 
+import ctranslate2
 from faster_whisper import WhisperModel
 
 
@@ -75,9 +76,23 @@ def download_audio(url: str, output_dir: Path) -> Path:
     )
 
 
-def transcribe(audio_path: Path) -> str:
-    logging.info("Loading WhisperModel medium (int8) ...")
-    model = WhisperModel("medium", compute_type="int8", num_workers=4, cpu_threads=4)
+def _pick_device() -> tuple[str, str, dict]:
+    gpu_count = ctranslate2.get_cuda_device_count()
+    if gpu_count > 0:
+        logging.info("GPU detected (%d device(s)) — using float16", gpu_count)
+        return "cuda", "float16", {}
+    logging.info("No GPU detected — using CPU int8")
+    return "cpu", "int8", {"num_workers": 4, "cpu_threads": 4}
+
+
+def transcribe(audio_path: Path, model_size: str = "medium", device: str | None = None) -> str:
+    if device:
+        dev, ctype, extra = device, "float16", {}
+    else:
+        dev, ctype, extra = _pick_device()
+
+    logging.info("Loading WhisperModel %s (%s, %s) ...", model_size, dev, ctype)
+    model = WhisperModel(model_size, device=dev, compute_type=ctype, **extra)
 
     logging.info("Transcribing (language=es, no timestamps) ...")
     segments, _info = model.transcribe(
@@ -100,13 +115,14 @@ def main() -> None:
     parser.add_argument("url", help="YouTube video URL")
     parser.add_argument("-o", "--output", help="Output file (default: stdout)")
     parser.add_argument("--model", default="medium", help="Whisper model size (default: medium)")
+    parser.add_argument("--device", choices=["cuda", "cpu"], help="Override device auto-detection")
     args = parser.parse_args()
 
     logging.basicConfig(level=logging.INFO, format="%(levelname)s: %(message)s")
 
     with tempfile.TemporaryDirectory(prefix="whisper_") as tmp:
         audio_path = download_audio(args.url, Path(tmp))
-        text = transcribe(audio_path)
+        text = transcribe(audio_path, model_size=args.model, device=args.device)
 
     if args.output:
         out_path = Path(args.output)
