@@ -9,7 +9,6 @@ Dependencies (install in project venv or use thesis venv):
 
 import argparse
 import logging
-import os
 import subprocess
 import sys
 import tempfile
@@ -22,19 +21,26 @@ from faster_whisper import WhisperModel
 def _run_ytdlp(args: list[str], output_dir: Path) -> Path:
     result = subprocess.run(
         args,
-        capture_output=True, text=True, check=True,
+        capture_output=True,
+        text=True,
+        check=True,
     )
-    lines = [l for l in result.stdout.strip().split("\n") if l]
+    lines = [line for line in result.stdout.strip().split("\n") if line]
     return Path(lines[-1]) if lines else output_dir / "audio.wav"
 
 
 def _default_args(url: str, output_dir: Path) -> list[str]:
     return [
         "yt-dlp",
-        "-x", "--audio-format", "wav",
-        "--audio-quality", "0",
-        "-o", str(output_dir / "%(id)s.%(ext)s"),
-        "--print", "filename",
+        "-x",
+        "--audio-format",
+        "wav",
+        "--audio-quality",
+        "0",
+        "-o",
+        str(output_dir / "%(id)s.%(ext)s"),
+        "--print",
+        "after_move:filepath",
         "--no-simulate",
         url,
     ]
@@ -43,12 +49,19 @@ def _default_args(url: str, output_dir: Path) -> list[str]:
 def _android_fallback_args(url: str, output_dir: Path) -> list[str]:
     return [
         "yt-dlp",
-        "--extractor-args", "youtube:player_client=android",
-        "-f", "18",
-        "-x", "--audio-format", "wav",
-        "--audio-quality", "0",
-        "-o", str(output_dir / "%(id)s.%(ext)s"),
-        "--print", "filename",
+        "--extractor-args",
+        "youtube:player_client=android",
+        "-f",
+        "18",
+        "-x",
+        "--audio-format",
+        "wav",
+        "--audio-quality",
+        "0",
+        "-o",
+        str(output_dir / "%(id)s.%(ext)s"),
+        "--print",
+        "after_move:filepath",
         "--no-simulate",
         url,
     ]
@@ -71,8 +84,7 @@ def download_audio(url: str, output_dir: Path) -> Path:
             logging.warning("%s strategy failed (exit %d)", label, e.returncode)
 
     raise RuntimeError(
-        f"All download strategies failed for {url}. "
-        "Try a newer yt-dlp version or use --cookies."
+        f"All download strategies failed for {url}. Try a newer yt-dlp version or use --cookies."
     )
 
 
