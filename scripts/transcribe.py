@@ -5,8 +5,7 @@ Usage:
 
 Setup (one-time):
     python3 -m venv .venv-transcribe
-    .venv-transcribe/bin/pip install faster-whisper nvidia-cublas-cu12 nvidia-cudnn-cu12
-    pip install yt-dlp  # system-level
+    .venv-transcribe/bin/pip install faster-whisper nvidia-cublas-cu12 nvidia-cudnn-cu12 yt-dlp
 
 The transcribe.sh wrapper sets LD_LIBRARY_PATH for the CUDA 12 libs bundled in .venv-transcribe.
 """
