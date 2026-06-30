@@ -1,10 +1,14 @@
 """Transcribe a YouTube video using yt-dlp + faster-whisper.
 
 Usage:
-    uv run python scripts/transcribe.py <url> [-o out.txt]
+    scripts/transcribe.sh <url> [-o out.txt] [--model medium] [--device cuda|cpu]
 
-Dependencies (install in project venv or use thesis venv):
-    pip install faster-whisper yt-dlp
+Setup (one-time):
+    python3 -m venv .venv-transcribe
+    .venv-transcribe/bin/pip install faster-whisper nvidia-cublas-cu12 nvidia-cudnn-cu12
+    pip install yt-dlp  # system-level
+
+The transcribe.sh wrapper sets LD_LIBRARY_PATH for the CUDA 12 libs bundled in .venv-transcribe.
 """
 
 import argparse
