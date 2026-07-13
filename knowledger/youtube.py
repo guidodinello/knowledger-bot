@@ -93,3 +93,9 @@ def fetch_video_metadata(url: str, proxy: ProxyConfig | None = None) -> VideoMet
 
 def sanitize_filename(text: str) -> str:
     return re.sub(r'[\\/:*?"<>|]', "", text).strip()
+
+
+def build_doc_name(channel_name: str, title: str, upload_date: str | None) -> str:
+    """Build the canonical doc name: ``Youtube - {channel} - {title} - {date}``."""
+    date_suffix = f" - {upload_date}" if upload_date else ""
+    return f"Youtube - {sanitize_filename(channel_name)} - {sanitize_filename(title)}{date_suffix}"

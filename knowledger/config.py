@@ -34,6 +34,9 @@ class Config:
     token_server_port: int | None = None
     personal_org_id: str | None = None
     cors_allowed_origin: str = "*"
+    auto_transcript_project: str | None = None
+    channels_path: Path = field(default_factory=lambda: Path("channels.json"))
+    poll_interval: int = 3600
 
 
 def load_config() -> Config:
@@ -71,11 +74,20 @@ def load_config() -> Config:
         except ValueError as e:
             raise ValueError("TOKEN_SERVER_PORT must be an integer") from e
 
+    raw_poll_interval = os.getenv("POLL_INTERVAL_SECONDS")
+    poll_interval = 3600
+    if raw_poll_interval:
+        try:
+            poll_interval = int(raw_poll_interval)
+        except ValueError as e:
+            raise ValueError("POLL_INTERVAL_SECONDS must be an integer") from e
+
     raw_log_file = os.getenv("LOG_FILE")
     raw_log_level = os.getenv("LOG_LEVEL")
+    logger_defaults = LoggerConfig()
     logger_config = LoggerConfig(
-        **({"level": raw_log_level.upper()} if raw_log_level else {}),
-        **({"file": Path(raw_log_file)} if raw_log_file else {}),
+        level=raw_log_level.upper() if raw_log_level else logger_defaults.level,
+        file=Path(raw_log_file) if raw_log_file else logger_defaults.file,
     )
 
     return Config(
@@ -92,6 +104,9 @@ def load_config() -> Config:
         token_update_secret=os.getenv("TOKEN_UPDATE_SECRET") or None,
         token_server_port=token_server_port,
         personal_org_id=os.getenv("PERSONAL_ORG_ID") or None,
-        **({"cors_allowed_origin": cors} if (cors := os.getenv("CORS_ALLOWED_ORIGIN")) else {}),
+        auto_transcript_project=os.getenv("AUTO_TRANSCRIPT_PROJECT") or None,
+        channels_path=Path(os.getenv("CHANNELS_PATH", "channels.json")),
+        poll_interval=poll_interval,
+        cors_allowed_origin=os.getenv("CORS_ALLOWED_ORIGIN") or "*",
         logger=logger_config,
     )

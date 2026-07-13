@@ -10,6 +10,7 @@ dependencies = [
     "curl-cffi>=0.7.0",
     "python-dotenv>=1.0.0",
     "aiohttp>=3.9",
+    "defusedxml>=0.7.1",
 ]
 
 [dependency-groups]

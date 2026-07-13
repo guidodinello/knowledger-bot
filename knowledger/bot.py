@@ -21,7 +21,7 @@ from .config import Config
 from .logger import get_logger
 from .queue import Queue, QueueEntry
 from .transcript import fetch_transcript
-from .youtube import VideoMetadata, extract_video_id, fetch_video_metadata, sanitize_filename
+from .youtube import VideoMetadata, build_doc_name, extract_video_id, fetch_video_metadata
 
 logger = get_logger(__name__)
 
@@ -246,10 +246,7 @@ async def handle_project_selection(update: Update, context: CustomContext) -> No
         await query.edit_message_text("Session expired. Please send the URL again.")
         return
 
-    channel = sanitize_filename(metadata.channel_name)
-    title = sanitize_filename(metadata.title)
-    date_suffix = f" - {metadata.upload_date}" if metadata.upload_date else ""
-    file_name = f"Youtube - {channel} - {title}{date_suffix}"
+    file_name = build_doc_name(metadata.channel_name, metadata.title, metadata.upload_date)
 
     await query.edit_message_text("Checking project...")
 
