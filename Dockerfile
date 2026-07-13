@@ -13,8 +13,11 @@ COPY channels.json .
 
 RUN uv sync --frozen --no-dev
 
-# Mount point for persistent state (poller_state.json, petition_queue.json).
-# Bind-mounted to a host dir at runtime; see deploy.sh + DATA_DIR.
+# Persistent state (poller_state.json, petition_queue.json) lives here, bind-mounted to a
+# host dir at runtime (see deploy.sh). Set as an image ENV rather than in the secrets
+# env-file: it's a property of the deployment, not a secret. Local runs leave DATA_DIR
+# unset and default to ".".
 RUN mkdir -p /app/data
+ENV DATA_DIR=/app/data
 
 CMD ["uv", "run", "python", "main.py"]

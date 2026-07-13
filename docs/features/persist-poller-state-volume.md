@@ -88,11 +88,16 @@ $SSH "mkdir -p \$HOME/knowledger-bot/data"
 #   -v \$HOME/knowledger-bot/data:/app/data
 ```
 
-### 6. `.env.oracle`
+### 6. `DATA_DIR` — set in the Dockerfile, not `.env.oracle`
 
+```dockerfile
+ENV DATA_DIR=/app/data
 ```
-DATA_DIR=/app/data
-```
+
+It's a property of the deployment, not a secret, so it belongs in the image rather than the
+secrets env-file. This also avoids a sequencing footgun: if `DATA_DIR` were synced to the
+server's `.env` before an image existed that creates/mounts `/app/data`, state writes would
+break. With the image ENV, the dir and the variable always ship together.
 
 ### 7. `.gitignore`
 
@@ -111,9 +116,9 @@ state.
 3. Confirm `docker logs` shows the poller loading existing state rather than
    "Baseline-seeded N existing videos" on every restart.
 
-## Sequencing note
+## Deploying
 
-When implementing: change the **code + Dockerfile first** (so the image creates `/app/data`
-and reads `DATA_DIR`), then `deploy.sh update`, and only **after** the new image is live add
-`DATA_DIR=/app/data` to `.env.oracle` + `deploy.sh env`. Setting `DATA_DIR` before the
-mount/dir exists would break state writes.
+Because `DATA_DIR` ships in the image (not the env-file), a single `deploy.sh update` is
+enough: it pulls the code, builds an image that both creates `/app/data` and sets
+`DATA_DIR`, and recreates the container with the host bind-mount from `deploy.sh`. No
+`deploy.sh env` step and no `.env.oracle` change required.
