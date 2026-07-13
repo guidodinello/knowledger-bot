@@ -13,4 +13,8 @@ COPY channels.json .
 
 RUN uv sync --frozen --no-dev
 
+# Mount point for persistent state (poller_state.json, petition_queue.json).
+# Bind-mounted to a host dir at runtime; see deploy.sh + DATA_DIR.
+RUN mkdir -p /app/data
+
 CMD ["uv", "run", "python", "main.py"]

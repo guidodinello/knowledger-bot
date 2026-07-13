@@ -37,6 +37,7 @@ class Config:
     auto_transcript_project: str | None = None
     channels_path: Path = field(default_factory=lambda: Path("channels.json"))
     poll_interval: int = 3600
+    data_dir: Path = field(default_factory=lambda: Path("."))
 
 
 def load_config() -> Config:
@@ -107,6 +108,7 @@ def load_config() -> Config:
         auto_transcript_project=os.getenv("AUTO_TRANSCRIPT_PROJECT") or None,
         channels_path=Path(os.getenv("CHANNELS_PATH", "channels.json")),
         poll_interval=poll_interval,
+        data_dir=Path(os.getenv("DATA_DIR", ".")),
         cors_allowed_origin=os.getenv("CORS_ALLOWED_ORIGIN") or "*",
         logger=logger_config,
     )
