@@ -433,7 +433,7 @@ def build_application(config: Config) -> Application:
     )
     app.bot_data["config"] = config
     app.bot_data["claude_client"] = ClaudeClient(config.claude_session_token)
-    app.bot_data["queue"] = Queue()
+    app.bot_data["queue"] = Queue(path=config.data_dir / "petition_queue.json")
 
     app.add_handler(CommandHandler("start", cmd_start))
     app.add_handler(CommandHandler("help", cmd_help))

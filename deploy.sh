@@ -27,7 +27,7 @@ sync_cookies() {
 }
 
 recreate() {
-    $SSH "cd $REMOTE_DIR && docker rm -f knowledger; docker run -d --name knowledger --restart unless-stopped --network=host --env-file .env -v \$HOME/knowledger-bot/cookies.txt:/app/cookies.txt:ro --log-opt max-size=10m --log-opt max-file=3 knowledger"
+    $SSH "mkdir -p \$HOME/knowledger-bot/data && cd $REMOTE_DIR && docker rm -f knowledger; docker run -d --name knowledger --restart unless-stopped --network=host --env-file .env -v \$HOME/knowledger-bot/cookies.txt:/app/cookies.txt:ro -v \$HOME/knowledger-bot/data:/app/data --log-opt max-size=10m --log-opt max-file=3 knowledger"
     echo "Waiting for bot to start..."
     $SSH "docker logs -f knowledger 2>&1 | grep -m1 'Application started'"
     echo "Bot is up."

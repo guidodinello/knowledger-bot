@@ -33,7 +33,6 @@ FEED_URL = "https://www.youtube.com/feeds/videos.xml"
 ATOM_NS = "{http://www.w3.org/2005/Atom}"
 YT_NS = "{http://www.youtube.com/xml/schemas/2015}"
 
-POLLER_STATE_FILE = Path("poller_state.json")
 UPLOAD_DELAY = timedelta(hours=24)  # wait for YouTube's polished captions to replace the draft
 GIVE_UP_AFTER = timedelta(hours=72)  # measured from first detection, not publish time
 # Priority order: a channel page carries its OWN id as "externalId" / the canonical
@@ -374,8 +373,10 @@ async def run_poller(app: Application, config: Config) -> None:
 
     await asyncio.to_thread(_resolve_missing_ids, channels, config.channels_path, config.proxy)
 
-    first_run = not POLLER_STATE_FILE.exists()
-    state = PollerState.load(POLLER_STATE_FILE)
+    config.data_dir.mkdir(parents=True, exist_ok=True)
+    state_path = config.data_dir / "poller_state.json"
+    first_run = not state_path.exists()
+    state = PollerState.load(state_path)
     if first_run:
         await asyncio.to_thread(_baseline_seed, channels, state, config.proxy)
         state.save()
