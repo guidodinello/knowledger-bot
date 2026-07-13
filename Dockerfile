@@ -9,6 +9,7 @@ RUN apk add --no-cache gcc musl-dev libffi-dev
 COPY pyproject.toml uv.lock README.md ./
 COPY knowledger/ knowledger/
 COPY main.py .
+COPY channels.json .
 
 RUN uv sync --frozen --no-dev
 
