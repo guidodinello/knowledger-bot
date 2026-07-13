@@ -26,6 +26,11 @@ async def main_async(config: Config) -> None:
     app = build_application(config)
     tasks = [asyncio.create_task(_run_polling(app))]
 
+    if config.auto_transcript_project is not None:
+        from knowledger.poller import run_poller
+
+        tasks.append(asyncio.create_task(run_poller(app, config)))
+
     if config.token_server_port is not None:
         from knowledger.http_server import build_aiohttp_app, run_http_server
 

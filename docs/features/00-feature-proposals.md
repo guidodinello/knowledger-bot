@@ -7,6 +7,7 @@
 | [Chrome extension: automatic token updater](chrome-extension-spec.md) | WXT/TypeScript extension that POSTs the new `sessionKey` to the bot whenever the user logs into claude.ai |
 | [Duplicate detection before upload](duplicate-detection.md) | Checks for an existing doc with the same filename before uploading; prompts Skip or Overwrite |
 | [Persistent upload queue on token failure](persistent-upload-queue.md) | On `AuthError`, serializes the already-fetched transcript to a JSON queue; `/refresh` drains and retries it |
+| [Auto-transcript on new upload](auto-transcript-on-upload.md) | In-process poller watches channel RSS feeds; 24h after a new video it fetches the transcript and uploads it to a designated project automatically |
 
 ## Proposed / Not yet implemented
 

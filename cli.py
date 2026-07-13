@@ -9,7 +9,7 @@ from dotenv import load_dotenv
 
 from knowledger.claude_client import AuthError, ClaudeClient
 from knowledger.transcript import fetch_transcript
-from knowledger.youtube import extract_video_id, fetch_video_metadata, sanitize_filename
+from knowledger.youtube import build_doc_name, extract_video_id, fetch_video_metadata
 
 
 def _pick_project(client: ClaudeClient, name: str | None) -> tuple[str, str]:
@@ -110,10 +110,7 @@ def main() -> None:
         print("Error: no captions available for this video.", file=sys.stderr)
         sys.exit(1)
 
-    file_name = (
-        f"Youtube - {sanitize_filename(metadata.channel_name)}"
-        f" - {sanitize_filename(metadata.title)}"
-    )
+    file_name = build_doc_name(metadata.channel_name, metadata.title, metadata.upload_date)
 
     print(f"Uploading to '{project_name}'...")
     try:

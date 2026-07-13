@@ -18,8 +18,16 @@ docs/improvements/
 
 cookies.txt
 
+# Runtime state
+poller_state.json
+petition_queue.json
+*.tmp
+
 *.png
 *.jpg
 *.jpeg
 
 logs/
+
+# Local working input (fetched chat transcript) — not published
+docs/features/auto-transcript-on-upload-chat.md
