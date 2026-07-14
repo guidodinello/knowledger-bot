@@ -31,4 +31,4 @@ petition_queue.json
 logs/
 
 # Local working input (fetched chat transcript) — not published
-docs/features/auto-transcript-on-upload-chat.md
+docs/features/*-chat.md

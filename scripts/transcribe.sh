@@ -7,7 +7,7 @@ VENV="$SCRIPT_DIR/../.venv-transcribe"
 PYTHON="$VENV/bin/python"
 
 if [[ ! -x "$PYTHON" ]]; then
-  echo "Error: $VENV not found. Run: python3 -m venv .venv-transcribe && .venv-transcribe/bin/pip install faster-whisper nvidia-cublas-cu12 nvidia-cudnn-cu12" >&2
+  echo "Error: $VENV not found. Run: uv venv .venv-transcribe && uv pip install --python .venv-transcribe/bin/python faster-whisper nvidia-cublas-cu12 nvidia-cudnn-cu12" >&2
   exit 1
 fi
 
