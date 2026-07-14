@@ -1,0 +1,88 @@
+name: Deploy to production
+
+on:
+  push:
+    branches: [main]
+
+concurrency:
+  group: deploy-production
+  cancel-in-progress: false
+
+jobs:
+  build:
+    name: Build and push image
+    # Native amd64 runner — matches the VPS architecture (x86_64), no QEMU needed.
+    runs-on: ubuntu-latest
+    if: vars.DEPLOY_ENABLED == 'true'
+    permissions:
+      contents: read
+      packages: write
+    outputs:
+      short_sha: ${{ steps.sha.outputs.short_sha }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7
+
+      - name: Compute short SHA
+        id: sha
+        run: echo "short_sha=$(git rev-parse --short HEAD)" >> "$GITHUB_OUTPUT"
+
+      - name: Log in to GHCR
+        uses: docker/login-action@af1e73f918a031802d376d3c8bbc3fe56130a9b0  # v4.4.0
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@bb05f3f5519dd87d3ba754cc423b652a5edd6d2c  # v4.2.0
+
+      - name: Build and push image
+        uses: docker/build-push-action@53b7df96c91f9c12dcc8a07bcb9ccacbed38856a  # v7.3.0
+        with:
+          context: .
+          platforms: linux/amd64
+          push: true
+          tags: |
+            ghcr.io/${{ github.repository_owner }}/knowledger:${{ steps.sha.outputs.short_sha }}
+            ghcr.io/${{ github.repository_owner }}/knowledger:latest
+          labels: |
+            org.opencontainers.image.source=https://github.com/${{ github.repository }}
+          cache-from: type=registry,ref=ghcr.io/${{ github.repository_owner }}/knowledger:buildcache
+          cache-to: type=registry,ref=ghcr.io/${{ github.repository_owner }}/knowledger:buildcache,mode=max
+
+  deploy:
+    name: SSH deploy
+    runs-on: ubuntu-latest
+    needs: build
+    steps:
+      - name: Deploy via SSH
+        uses: appleboy/ssh-action@0ff4204d59e8e51228ff73bce53f80d53301dee2  # v1.2.5
+        with:
+          host: ${{ secrets.DEPLOY_HOST }}
+          username: ubuntu
+          key: ${{ secrets.DEPLOY_SSH_KEY }}
+          fingerprint: ${{ secrets.DEPLOY_HOST_FINGERPRINT }}
+          command_timeout: 10m
+          # appleboy/drone-ssh reads INPUT_SCRIPT_STOP directly and aborts the
+          # remote script on the first failing command (a failed `docker pull`,
+          # e.g. GHCR auth, would otherwise be swallowed and report success).
+          script_stop: true
+          # The image is self-contained (channels.json is baked in), so the VPS
+          # needs no git checkout — only the persistent host files: .env,
+          # cookies.txt, and data/ (poller state). Those are managed out-of-band
+          # via `./deploy.sh env` / `./deploy.sh cookies`, never through CI.
+          script: |
+            IMAGE=ghcr.io/${{ github.repository_owner }}/knowledger:${{ needs.build.outputs.short_sha }}
+            cd /home/ubuntu/knowledger-bot
+            docker pull "$IMAGE"
+            docker rm -f knowledger || true
+            docker run -d --name knowledger \
+              --restart unless-stopped \
+              --network=host \
+              --env-file .env \
+              -v /home/ubuntu/knowledger-bot/cookies.txt:/app/cookies.txt:ro \
+              -v /home/ubuntu/knowledger-bot/data:/app/data \
+              --log-opt max-size=10m --log-opt max-file=3 \
+              "$IMAGE"
+            docker image prune -f
