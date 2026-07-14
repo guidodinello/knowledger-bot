@@ -1,7 +1,13 @@
-"""Transcribe a YouTube video using yt-dlp + faster-whisper.
+"""Transcribe a YouTube video or Instagram Reel using yt-dlp + faster-whisper.
 
 Usage:
     scripts/transcribe.sh <url> [-o out.txt] [--model medium] [--device cuda|cpu]
+                          [--cookies cookies.txt] [--language es]
+
+Instagram Reels have no caption API and sit behind a login-wall even when publicly
+viewable in a browser — pass --cookies with a Netscape-format cookie file (e.g. exported
+via a "Get cookies.txt" browser extension while logged into an account that can view the
+Reel). --language defaults to Whisper auto-detection; pass a code (es, en, ...) to force it.
 
 Setup (one-time):
     python3 -m venv .venv-transcribe
@@ -70,13 +76,37 @@ def _android_fallback_args(url: str, output_dir: Path) -> list[str]:
     ]
 
 
-def download_audio(url: str, output_dir: Path) -> Path:
+def _cookies_args(url: str, output_dir: Path, cookies_path: Path) -> list[str]:
+    return [
+        "yt-dlp",
+        "--cookies",
+        str(cookies_path),
+        "-x",
+        "--audio-format",
+        "wav",
+        "--audio-quality",
+        "0",
+        "-o",
+        str(output_dir / "%(id)s.%(ext)s"),
+        "--print",
+        "after_move:filepath",
+        "--no-simulate",
+        url,
+    ]
+
+
+def download_audio(url: str, output_dir: Path, cookies_path: Path | None = None) -> Path:
     logging.info("Downloading audio from %s ...", url)
 
-    strategies = [
-        ("default", _default_args),
-        ("android fallback", _android_fallback_args),
-    ]
+    if cookies_path is not None:
+        # Cookies auth replaces (not adds to) the android fallback, which is YouTube-only
+        # and would just waste a request against Instagram's login-wall.
+        strategies = [("cookies", lambda u, d: _cookies_args(u, d, cookies_path))]
+    else:
+        strategies = [
+            ("default", _default_args),
+            ("android fallback", _android_fallback_args),
+        ]
 
     for label, build_args in strategies:
         try:
@@ -100,7 +130,12 @@ def _pick_device() -> tuple[str, str, dict]:
     return "cpu", "int8", {"num_workers": 4, "cpu_threads": 4}
 
 
-def transcribe(audio_path: Path, model_size: str = "medium", device: str | None = None) -> str:
+def transcribe(
+    audio_path: Path,
+    model_size: str = "medium",
+    device: str | None = None,
+    language: str | None = None,
+) -> str:
     if device:
         dev, ctype, extra = device, "float16", {}
     else:
@@ -109,10 +144,10 @@ def transcribe(audio_path: Path, model_size: str = "medium", device: str | None 
     logging.info("Loading WhisperModel %s (%s, %s) ...", model_size, dev, ctype)
     model = WhisperModel(model_size, device=dev, compute_type=ctype, **extra)
 
-    logging.info("Transcribing (language=es, no timestamps) ...")
+    logging.info("Transcribing (language=%s, no timestamps) ...", language or "auto-detect")
     segments, _info = model.transcribe(
         str(audio_path),
-        language="es",
+        language=language,
         initial_prompt=None,
         word_timestamps=False,
         vad_filter=True,
@@ -126,18 +161,30 @@ def transcribe(audio_path: Path, model_size: str = "medium", device: str | None 
 
 
 def main() -> None:
-    parser = argparse.ArgumentParser(description="Transcribe a YouTube video with faster-whisper")
-    parser.add_argument("url", help="YouTube video URL")
+    parser = argparse.ArgumentParser(
+        description="Transcribe a YouTube video or Instagram Reel with faster-whisper"
+    )
+    parser.add_argument("url", help="YouTube or Instagram Reel URL")
     parser.add_argument("-o", "--output", help="Output file (default: stdout)")
     parser.add_argument("--model", default="medium", help="Whisper model size (default: medium)")
     parser.add_argument("--device", choices=["cuda", "cpu"], help="Override device auto-detection")
+    parser.add_argument(
+        "--cookies",
+        help="Netscape-format cookies file (required for Instagram; unused for YouTube)",
+    )
+    parser.add_argument(
+        "--language", help="Force transcription language (e.g. es, en); default: auto-detect"
+    )
     args = parser.parse_args()
 
     logging.basicConfig(level=logging.INFO, format="%(levelname)s: %(message)s")
 
+    cookies_path = Path(args.cookies) if args.cookies else None
     with tempfile.TemporaryDirectory(prefix="whisper_") as tmp:
-        audio_path = download_audio(args.url, Path(tmp))
-        text = transcribe(audio_path, model_size=args.model, device=args.device)
+        audio_path = download_audio(args.url, Path(tmp), cookies_path=cookies_path)
+        text = transcribe(
+            audio_path, model_size=args.model, device=args.device, language=args.language
+        )
 
     if args.output:
         out_path = Path(args.output)

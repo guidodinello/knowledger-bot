@@ -8,10 +8,10 @@
 | [Duplicate detection before upload](duplicate-detection.md) | Checks for an existing doc with the same filename before uploading; prompts Skip or Overwrite |
 | [Persistent upload queue on token failure](persistent-upload-queue.md) | On `AuthError`, serializes the already-fetched transcript to a JSON queue; `/refresh` drains and retries it |
 | [Auto-transcript on new upload](auto-transcript-on-upload.md) | In-process poller watches channel RSS feeds; 24h after a new video it fetches the transcript and uploads it to a designated project automatically |
+| [Persist poller/queue state across restarts](persist-poller-state-volume.md) | Mounts a persistent data directory so `poller_state.json` and `petition_queue.json` survive container restarts instead of resetting |
 
 ## Proposed / Not yet implemented
 
 | Feature | Summary |
 |-------|---------|
-| [Improver command](improver-command.md) | rough idea, no spec yet |
-| [Instagram Reel support](instagram-reel-support.md) | Capture + transcribe Instagram Reels (not just YouTube). Feasibility: low — no public API for reel captions, scraping is fragile and against ToS. |
+| [Instagram Reel support](instagram-reel-support.md) | Extend `scripts/transcribe.py` (offline, manual) to download Instagram Reels via yt-dlp cookies auth and transcribe with faster-whisper. Feasibility: low-effort but manual-only — no caption API, no bot/poller integration. |
