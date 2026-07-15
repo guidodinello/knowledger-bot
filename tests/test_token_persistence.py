@@ -5,6 +5,7 @@ import pytest
 
 from knowledger.claude_client import ClaudeClient
 from knowledger.config import _load_persisted_token, load_config
+from knowledger.persistence import CorruptDataError, PersistenceIOError
 
 
 @pytest.fixture(autouse=True)
@@ -25,9 +26,27 @@ def test_load_persisted_token_missing_file_returns_none(tmp_path: Path) -> None:
     assert _load_persisted_token(tmp_path) is None
 
 
-def test_load_persisted_token_corrupt_file_returns_none(tmp_path: Path) -> None:
+def test_load_persisted_token_corrupt_json_fails_closed(tmp_path: Path) -> None:
     (tmp_path / "session_token.json").write_text("not json")
-    assert _load_persisted_token(tmp_path) is None
+    with pytest.raises(CorruptDataError):
+        _load_persisted_token(tmp_path)
+
+
+def test_load_persisted_token_wrong_schema_fails_closed(tmp_path: Path) -> None:
+    (tmp_path / "session_token.json").write_text(json.dumps({"not_token": "x"}))
+    with pytest.raises(CorruptDataError):
+        _load_persisted_token(tmp_path)
+
+
+def test_load_persisted_token_unreadable_file_fails_closed(tmp_path: Path) -> None:
+    path = tmp_path / "session_token.json"
+    path.write_text(json.dumps({"token": "x"}))
+    path.chmod(0o000)
+    try:
+        with pytest.raises(PersistenceIOError):
+            _load_persisted_token(tmp_path)
+    finally:
+        path.chmod(0o600)  # restore so tmp_path cleanup can remove it
 
 
 def test_load_persisted_token_reads_written_value(tmp_path: Path) -> None:
@@ -57,6 +76,31 @@ def test_persisted_token_file_is_owner_only_readable(tmp_path: Path) -> None:
     assert (persist_path.stat().st_mode & 0o777) == 0o600
 
 
+def test_update_token_persist_failure_leaves_old_token_active(tmp_path: Path) -> None:
+    """Persist-before-activate: if durable storage can't be written, the old cookie and
+    caches must remain in effect — a caller must not end up running on a token that
+    only exists in memory and would be silently reverted by a restart."""
+    persist_path = tmp_path / "missing-parent-dir" / "session_token.json"
+    client = ClaudeClient("initial", persist_path=persist_path)
+
+    with pytest.raises(OSError):
+        client.update_token("new-token")
+
+    assert client._cookie == "sessionKey=initial"
+
+
+def test_update_token_persists_before_swapping_cookie(tmp_path: Path) -> None:
+    """A successful persist must happen before the in-memory cookie changes — verified
+    by checking the file is already durable by the time update_token returns."""
+    persist_path = tmp_path / "session_token.json"
+    client = ClaudeClient("initial", persist_path=persist_path)
+
+    client.update_token("new-token")
+
+    assert client._cookie == "sessionKey=new-token"
+    assert json.loads(persist_path.read_text())["token"] == "new-token"
+
+
 def test_load_config_falls_back_to_env_var_when_no_persisted_token(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -81,6 +125,19 @@ def test_load_config_prefers_persisted_token_over_stale_env_var(
     config = load_config()
 
     assert config.claude_session_token == "fresh-token-123"
+
+
+def test_load_config_fails_closed_on_corrupt_persisted_token(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A corrupt persisted-token file must not silently fall back to the (possibly
+    stale/revoked) env var — startup should fail loudly instead."""
+    monkeypatch.setenv("DATA_DIR", str(tmp_path))
+    monkeypatch.setenv("CLAUDE_SESSION_TOKEN", "stale-env-token")
+    (tmp_path / "session_token.json").write_text("not json")
+
+    with pytest.raises(CorruptDataError):
+        load_config()
 
 
 if __name__ == "__main__":

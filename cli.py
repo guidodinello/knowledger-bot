@@ -8,13 +8,13 @@ from pathlib import Path
 from dotenv import load_dotenv
 
 from knowledger.claude_client import AuthError, ClaudeClient
-from knowledger.transcript import fetch_transcript
+from knowledger.transcript import TranscriptTransportError, TranscriptUnavailable, fetch_transcript
 from knowledger.youtube import build_doc_name, extract_video_id, fetch_video_metadata
 
 
 def _pick_project(client: ClaudeClient, name: str | None) -> tuple[str, str]:
     try:
-        projects = client.projects
+        projects = client.list_projects()
     except AuthError:
         raise
     except Exception as e:
@@ -103,11 +103,11 @@ def main() -> None:
     print("\nFetching transcript...")
     try:
         transcript = fetch_transcript(video_id, cookies_path=cookies_path)
-    except Exception as e:
-        print(f"Error fetching transcript: {e}", file=sys.stderr)
-        sys.exit(1)
-    if transcript is None:
+    except TranscriptUnavailable:
         print("Error: no captions available for this video.", file=sys.stderr)
+        sys.exit(1)
+    except TranscriptTransportError as e:
+        print(f"Error: transcript request was blocked (try again later): {e}", file=sys.stderr)
         sys.exit(1)
 
     file_name = build_doc_name(metadata.channel_name, metadata.title, metadata.upload_date)

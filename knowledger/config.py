@@ -1,4 +1,3 @@
-import json
 import os
 from dataclasses import dataclass, field
 from datetime import date
@@ -7,6 +6,7 @@ from pathlib import Path
 from dotenv import load_dotenv
 
 from .logger import get_logger
+from .persistence import CorruptDataError, load_json
 
 logger = get_logger(__name__)
 
@@ -14,16 +14,20 @@ logger = get_logger(__name__)
 def _load_persisted_token(data_dir: Path) -> str | None:
     """Read a token written by ClaudeClient.update_token() on a prior run — takes priority
     over CLAUDE_SESSION_TOKEN so a live token update survives the next restart instead of
-    being silently reverted to whatever's baked into the env var."""
+    being silently reverted to whatever's baked into the env var.
+
+    A missing file is a valid first-run state (falls back to CLAUDE_SESSION_TOKEN). An
+    existing but corrupt/unreadable file fails closed (raises) instead of silently
+    falling back — that would risk reactivating a stale, possibly-revoked env token
+    without anyone noticing the persisted one couldn't be read."""
     path = data_dir / "session_token.json"
-    try:
-        token = json.loads(path.read_text(encoding="utf-8")).get("token")
-    except FileNotFoundError:
+    raw = load_json(path)
+    if raw is None:
         return None
-    except Exception:
-        logger.warning("Persisted token file %s is corrupt or unreadable", path, exc_info=True)
-        return None
-    return token.strip() if isinstance(token, str) and token.strip() else None
+    if not isinstance(raw, dict) or not isinstance(raw.get("token"), str):
+        raise CorruptDataError(path, "expected a JSON object with a string 'token' field")
+    token = raw["token"].strip()
+    return token or None
 
 
 @dataclass(frozen=True, slots=True)

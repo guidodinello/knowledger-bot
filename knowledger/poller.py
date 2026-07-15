@@ -8,8 +8,6 @@ path (``ClaudeClient.list_docs`` / ``upload_content``) and the ``Queue`` auth-fa
 """
 
 import asyncio
-import json
-import os
 import re
 from dataclasses import asdict, dataclass, field, replace
 from datetime import UTC, datetime, timedelta
@@ -24,8 +22,10 @@ from .claude_client import AuthError, ClaudeClient
 from .config import Config, ProxyConfig
 from .logger import get_logger
 from .notify import notify
+from .persistence import CorruptDataError, PersistenceError, atomic_write_json, load_json
 from .queue import Queue, QueueEntry
-from .transcript import fetch_transcript
+from .queue_processor import MAX_UPLOAD_ATTEMPTS
+from .transcript import TranscriptTransportError, TranscriptUnavailable, fetch_transcript
 from .youtube import build_doc_name
 
 logger = get_logger(__name__)
@@ -36,7 +36,6 @@ YT_NS = "{http://www.youtube.com/xml/schemas/2015}"
 
 UPLOAD_DELAY = timedelta(hours=24)  # wait for YouTube's polished captions to replace the draft
 GIVE_UP_AFTER = timedelta(hours=72)  # measured from first detection, not publish time
-MAX_UPLOAD_ATTEMPTS = 5  # non-auth upload failures before alerting; also the re-alert cooldown
 # Priority order: a channel page carries its OWN id as "externalId" / the canonical
 # /channel/ link, but also embeds OTHER channels' "channelId" (recommendations, etc.) —
 # so match the authoritative fields first and fall back to a bare channelId only last.
@@ -74,45 +73,44 @@ class PollerState:
 
     @classmethod
     def load(cls, path: Path) -> "PollerState":
-        """Load state. Missing or corrupt file is treated as empty (logged at WARNING)."""
+        """Load state. A missing file is a valid first-run/empty state. A corrupt or
+        unreadable existing file fails closed (raises) instead of silently resetting —
+        that would re-run first-run baseline seeding and re-detect every pending video
+        as brand new."""
+        raw = load_json(path)
+        if raw is None:
+            return cls(path=path)
         try:
-            data = json.loads(path.read_text(encoding="utf-8"))
             return cls(
                 path=path,
-                seen=set(data["seen"]),
-                pending=[PendingVideo(**p) for p in data["pending"]],
+                seen=set(raw["seen"]),
+                pending=[PendingVideo(**p) for p in raw["pending"]],
             )
-        except FileNotFoundError:
-            return cls(path=path)
-        except Exception:
-            logger.warning(
-                "State file %s is corrupt or unreadable; treating as empty", path, exc_info=True
-            )
-            return cls(path=path)
+        except (KeyError, TypeError) as e:
+            raise CorruptDataError(path, f"malformed poller state: {e}") from e
 
     def save(self) -> None:
-        tmp = self.path.with_suffix(".tmp")
         payload = {"seen": sorted(self.seen), "pending": [asdict(v) for v in self.pending]}
-        tmp.write_text(json.dumps(payload, indent=2), encoding="utf-8")
-        os.replace(tmp, self.path)
+        atomic_write_json(self.path, payload)
 
 
 def load_channels(path: Path) -> list[Channel]:
-    try:
-        data = json.loads(path.read_text(encoding="utf-8"))
-    except FileNotFoundError:
+    """Missing channels file: valid empty state (poller idle). An existing but corrupt
+    or unreadable file fails closed instead of silently disabling the poller."""
+    raw = load_json(path)
+    if raw is None:
         logger.warning("Channels file %s not found; poller has nothing to watch", path)
         return []
-    except Exception:
-        logger.warning("Channels file %s is corrupt or unreadable", path, exc_info=True)
-        return []
-    return [Channel(**c) for c in data]
+    if not isinstance(raw, list):
+        raise CorruptDataError(path, "expected a JSON array of channels")
+    try:
+        return [Channel(**c) for c in raw]
+    except TypeError as e:
+        raise CorruptDataError(path, f"malformed channel entry: {e}") from e
 
 
 def _save_channels(path: Path, channels: list[Channel]) -> None:
-    tmp = path.with_suffix(".tmp")
-    tmp.write_text(json.dumps([asdict(c) for c in channels], indent=2), encoding="utf-8")
-    os.replace(tmp, path)
+    atomic_write_json(path, [asdict(c) for c in channels])
 
 
 def _proxies(proxy: ProxyConfig | None) -> dict[str, str] | None:
@@ -219,7 +217,11 @@ def _resolve_project(client: ClaudeClient, name_or_uuid: str) -> str | None:
     """Resolve AUTO_TRANSCRIPT_PROJECT — accepts either a project uuid or a project name."""
     target = name_or_uuid.lower()
     match = next(
-        (p for p in client.projects if name_or_uuid == p["uuid"] or target == p["name"].lower()),
+        (
+            p
+            for p in client.list_projects()
+            if name_or_uuid == p["uuid"] or target == p["name"].lower()
+        ),
         None,
     )
     if match is None:
@@ -246,10 +248,9 @@ def _enqueue_auth_fallback(
         video_title=video.title,
         queued_at=datetime.now(UTC).isoformat(),
     )
-    try:
-        queue.enqueue(entry)
-    except Exception:
-        logger.exception("Failed to enqueue %s after auth error", file_name)
+    # Persistence failures propagate rather than being logged and swallowed — silently
+    # discarding a fetched transcript here would lose it with no record it ever existed.
+    queue.enqueue(entry)
 
 
 async def _process_video(
@@ -263,16 +264,23 @@ async def _process_video(
 ) -> PendingVideo | None:
     """Fetch + upload one due video. Returns the (possibly updated) video to keep it in the
     pending list, or None once it's done — confirmed uploaded, or permanently given up on."""
-    transcript = await asyncio.to_thread(
-        fetch_transcript, video.video_id, config.proxy, config.youtube_cookies_path
-    )
-    if transcript is None:
+    try:
+        transcript = await asyncio.to_thread(
+            fetch_transcript, video.video_id, config.proxy, config.youtube_cookies_path
+        )
+    except TranscriptUnavailable:
+        # Only an authoritative "no transcript" result may age into the give-up policy —
+        # a transient transport failure must stay retryable indefinitely, or a temporary
+        # block during the 72h window would get permanently misclassified as no captions.
         first_seen = datetime.fromisoformat(video.first_seen)
         if now - first_seen >= GIVE_UP_AFTER:
             logger.info("Giving up on %s — no captions after %s", video.video_id, GIVE_UP_AFTER)
             await notify(app, config, f"⚠️ No captions for “{video.title}” — gave up.")
             return None
         logger.info("Transcript not ready for %s; will retry", video.video_id)
+        return video
+    except TranscriptTransportError:
+        logger.info("Transcript request blocked for %s; will retry", video.video_id)
         return video
 
     file_name = build_doc_name(video.channel_name, video.title, video.published[:10])
@@ -410,6 +418,11 @@ async def run_poller(app: Application, config: Config) -> None:
         try:
             await _tick(app, config, client, queue, channels, state, project_name)
         except asyncio.CancelledError:
+            raise
+        except PersistenceError:
+            # Fatal: state/queue can no longer be trusted. Let this propagate out of the
+            # poller task so structured supervision (see main.py) terminates the whole
+            # process visibly instead of continuing to run on unreliable persistence.
             raise
         except Exception:
             logger.exception("Poller tick failed; continuing")

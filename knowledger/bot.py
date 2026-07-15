@@ -1,5 +1,4 @@
 import asyncio
-from dataclasses import dataclass, replace
 from datetime import UTC, datetime
 from functools import wraps
 from typing import Any, TypedDict
@@ -20,10 +19,9 @@ from telegram.helpers import escape_markdown
 from .claude_client import AuthError, ClaudeClient, Doc, Project
 from .config import Config
 from .logger import get_logger
-from .notify import notify
-from .poller import MAX_UPLOAD_ATTEMPTS
 from .queue import Queue, QueueEntry
-from .transcript import fetch_transcript
+from .queue_processor import DrainResult, QueueProcessor
+from .transcript import TranscriptTransportError, TranscriptUnavailable, fetch_transcript
 from .youtube import VideoMetadata, build_doc_name, extract_video_id, fetch_video_metadata
 
 logger = get_logger(__name__)
@@ -33,6 +31,7 @@ class BotData(TypedDict):
     config: Config
     claude_client: ClaudeClient
     queue: Queue
+    queue_processor: QueueProcessor
 
 
 class PendingUpload(TypedDict):
@@ -109,7 +108,7 @@ async def cmd_refresh(update: Update, context: CustomContext) -> None:
     client = context.bot_data["claude_client"]
     client.invalidate_projects()
     try:
-        projects = await asyncio.to_thread(lambda: client.projects)
+        projects = await asyncio.to_thread(client.list_projects)
         await update.message.reply_text(f"Done. {len(projects)} project(s) loaded.")
     except AuthError as e:
         await update.message.reply_text(f"Auth error: {e}")
@@ -119,9 +118,14 @@ async def cmd_refresh(update: Update, context: CustomContext) -> None:
         await update.message.reply_text(f"Refresh failed: {e}")
         return
 
-    result = await drain_queue(
-        context.application, context.bot_data["config"], client, context.bot_data["queue"]
-    )
+    try:
+        result = await context.bot_data["queue_processor"].drain(
+            context.application, context.bot_data["config"], client
+        )
+    except Exception as e:
+        logger.exception("Queue drain failed")
+        await update.message.reply_text(f"Queue drain failed: {e}. It will retry on next /refresh.")
+        return
     if result.uploaded or result.already_existed or result.failed_auth or result.failed_other:
         parts = [f"{result.uploaded} queued upload(s) saved"]
         if result.already_existed:
@@ -133,162 +137,20 @@ async def cmd_refresh(update: Update, context: CustomContext) -> None:
         await update.message.reply_text(", ".join(parts) + ".")
 
 
-@dataclass(slots=True)
-class DrainResult:
-    uploaded: int = 0
-    already_existed: int = 0
-    failed_auth: int = 0
-    failed_other: int = 0
-
-
-def _requeue(queue: Queue, entry: QueueEntry) -> None:
-    """Persist entry back to the queue. A storage failure here loses just this one entry
-    (logged loudly) instead of — via an unguarded exception — the rest of the batch too."""
-    try:
-        queue.enqueue(entry)
-    except Exception:
-        logger.exception("Failed to persist requeue for %s — entry may be lost", entry.file_name)
-
-
-async def _upload_and_track(
+async def drain_queue(
     telegram_app: Application,
     config: Config,
     client: ClaudeClient,
     queue: Queue,
-    entry: QueueEntry,
-    result: DrainResult,
-) -> None:
-    """Attempt entry's upload. On success, notify the original chat and drop it from the
-    queue. On an auth error, requeue silently — this is the expected case until the token
-    is fixed. On any other request failure, requeue with an incremented attempt count and
-    alert every MAX_UPLOAD_ATTEMPTS attempts, so a genuinely broken entry doesn't fail
-    invisibly forever. Anything outside RequestException is a programming error, not a
-    transient failure — let it propagate instead of retrying it forever."""
-    try:
-        await asyncio.to_thread(
-            client.upload_content, entry.project_id, entry.transcript, entry.file_name
-        )
-    except AuthError:
-        _requeue(queue, entry)
-        result.failed_auth += 1
-        return
-    except RequestException:
-        logger.exception("Queue retry failed for %s", entry.file_name)
-        attempts = entry.upload_attempts + 1
-        _requeue(queue, replace(entry, upload_attempts=attempts))
-        if attempts % MAX_UPLOAD_ATTEMPTS == 0:
-            await notify(
-                telegram_app,
-                config,
-                f"🛑 Queued upload stuck for “{entry.file_name}” — failed {attempts}x in a "
-                "row. Check logs; it will keep retrying.",
-            )
-        result.failed_other += 1
-        return
-
-    result.uploaded += 1
-    escaped = escape_markdown(entry.file_name, version=1)
-    await telegram_app.bot.send_message(
-        entry.chat_id, f"Queued upload saved: *{escaped}*", parse_mode="Markdown"
-    )
-
-
-async def drain_queue(
-    telegram_app: Application, config: Config, client: ClaudeClient, queue: Queue
+    processor: QueueProcessor | None = None,
 ) -> DrainResult:
-    """Attempt every queued entry once — auth-fallback uploads and overwrites alike. Called
-    both from /refresh (manual) and automatically the moment the Claude token is updated.
-
-    Each entry is removed from the queue right before it's processed, rather than bulk-
-    draining the whole file up front: if the process is killed mid-run, only the one entry
-    in flight is at risk — everything else is untouched on disk, ready for the next drain."""
-    entries = queue.peek()
-    result = DrainResult()
-    if not entries:
-        return result
-
-    docs_by_project: dict[str, list[Doc]] = {}
-    for entry in entries:
-        try:
-            queue.remove(entry.project_id, entry.video_id)
-        except Exception:
-            logger.exception(
-                "Failed to remove queued entry %s before retrying; skipping this round",
-                entry.file_name,
-            )
-            result.failed_other += 1
-            continue
-
-        if entry.project_id not in docs_by_project:
-            try:
-                docs_by_project[entry.project_id] = await asyncio.to_thread(
-                    client.list_docs, entry.project_id
-                )
-            except AuthError:
-                _requeue(queue, entry)
-                result.failed_auth += 1
-                continue
-            except RequestException:
-                # Unknown state for this project — don't guess; requeue rather than risk
-                # treating "listing failed" as "the doc doesn't exist" for every entry
-                # sharing this project_id.
-                logger.exception("Failed to list docs for project %s", entry.project_id)
-                attempts = entry.upload_attempts + 1
-                _requeue(queue, replace(entry, upload_attempts=attempts))
-                if attempts % MAX_UPLOAD_ATTEMPTS == 0:
-                    await notify(
-                        telegram_app,
-                        config,
-                        f"🛑 Queued upload stuck for “{entry.file_name}” — failed "
-                        f"{attempts}x in a row listing project docs. Check logs.",
-                    )
-                result.failed_other += 1
-                continue
-        docs = docs_by_project[entry.project_id]
-
-        if entry.overwrite_doc_uuid is not None:
-            # The delete may have already landed on a prior attempt — check first so a
-            # retry never re-deletes (or 404s trying to delete) an already-gone doc.
-            if any(d["uuid"] == entry.overwrite_doc_uuid for d in docs):
-                try:
-                    await asyncio.to_thread(
-                        client.delete_doc, entry.project_id, entry.overwrite_doc_uuid
-                    )
-                except AuthError:
-                    _requeue(queue, entry)
-                    result.failed_auth += 1
-                    continue
-                except RequestException:
-                    logger.exception("Queued delete failed for %s", entry.file_name)
-                    attempts = entry.upload_attempts + 1
-                    _requeue(queue, replace(entry, upload_attempts=attempts))
-                    if attempts % MAX_UPLOAD_ATTEMPTS == 0:
-                        await notify(
-                            telegram_app,
-                            config,
-                            f"🛑 Queued overwrite stuck for “{entry.file_name}” — failed "
-                            f"{attempts}x in a row deleting the old doc. Check logs.",
-                        )
-                    result.failed_other += 1
-                    continue
-            elif any(d["file_name"] == entry.file_name for d in docs):
-                # Old doc already gone AND a doc with this name already exists: the
-                # replacement landed on a prior attempt whose confirmation we never saw
-                # (e.g. the response was lost). Uploading again would create a duplicate.
-                logger.info("Overwrite already landed, skipping: %s", entry.file_name)
-                result.already_existed += 1
-                continue
-            await _upload_and_track(telegram_app, config, client, queue, entry, result)
-            continue
-
-        if any(d["file_name"] == entry.file_name for d in docs):
-            logger.info("Queued entry already uploaded, skipping: %s", entry.file_name)
-            result.already_existed += 1
-            continue
-
-        await _upload_and_track(telegram_app, config, client, queue, entry, result)
-
-    return result
+    """Attempt every currently-queued entry once via QueueProcessor. In the running
+    application, /refresh and the HTTP token-update drain always pass the SAME shared
+    processor (see build_application / bot_data["queue_processor"]) so overlapping
+    triggers cannot double-upload; a fresh throwaway processor is used only when none is
+    supplied (e.g. direct/manual calls in tests)."""
+    proc = processor if processor is not None else QueueProcessor(queue)
+    return await proc.drain(telegram_app, config, client)
 
 
 @_require_auth
@@ -314,7 +176,7 @@ async def handle_youtube_url(update: Update, context: CustomContext) -> None:
         return
 
     try:
-        projects = await asyncio.to_thread(lambda: context.bot_data["claude_client"].projects)
+        projects = await asyncio.to_thread(context.bot_data["claude_client"].list_projects)
     except AuthError as e:
         await update.message.reply_text(f"Auth error: {e}")
         return
@@ -358,9 +220,7 @@ async def handle_project_selection(update: Update, context: CustomContext) -> No
     match project_id:
         case "more":
             try:
-                projects = await asyncio.to_thread(
-                    lambda: context.bot_data["claude_client"].projects
-                )
+                projects = await asyncio.to_thread(context.bot_data["claude_client"].list_projects)
             except AuthError as e:
                 await query.answer(str(e)[:200])
                 return
@@ -416,16 +276,22 @@ async def handle_project_selection(update: Update, context: CustomContext) -> No
     await query.edit_message_text("Fetching transcript...")
 
     logger.info("Fetching transcript for %s", file_name)
-    transcript = await asyncio.to_thread(
-        fetch_transcript,
-        metadata.video_id,
-        proxy=context.bot_data["config"].proxy,
-        cookies_path=context.bot_data["config"].youtube_cookies_path,
-    )
-    if transcript is None:
+    try:
+        transcript = await asyncio.to_thread(
+            fetch_transcript,
+            metadata.video_id,
+            proxy=context.bot_data["config"].proxy,
+            cookies_path=context.bot_data["config"].youtube_cookies_path,
+        )
+    except TranscriptUnavailable:
         await query.edit_message_text(
             f"No captions available for *{escape_markdown(metadata.title, version=1)}*.",
             parse_mode="Markdown",
+        )
+        return
+    except TranscriptTransportError:
+        await query.edit_message_text(
+            "Transcript request was blocked — this is usually temporary. Please try again shortly."
         )
         return
 
@@ -508,15 +374,66 @@ async def handle_duplicate_choice(update: Update, context: CustomContext) -> Non
     await query.edit_message_text("Fetching transcript...")
 
     logger.info("Fetching transcript for overwrite: %s", pending["file_name"])
-    transcript = await asyncio.to_thread(
-        fetch_transcript,
-        pending["video_id"],
-        proxy=context.bot_data["config"].proxy,
-        cookies_path=context.bot_data["config"].youtube_cookies_path,
-    )
-    if transcript is None:
+    try:
+        transcript = await asyncio.to_thread(
+            fetch_transcript,
+            pending["video_id"],
+            proxy=context.bot_data["config"].proxy,
+            cookies_path=context.bot_data["config"].youtube_cookies_path,
+        )
+    except TranscriptUnavailable:
         await query.edit_message_text(
             f"No captions available for *{escape_markdown(pending['file_name'], version=1)}*.",
+            parse_mode="Markdown",
+        )
+        return
+    except TranscriptTransportError:
+        await query.edit_message_text(
+            "Transcript request was blocked — this is usually temporary. Please try again shortly."
+        )
+        return
+
+    if update.effective_chat is None:
+        return
+
+    # Durability fix (audit finding 1): record the replacement BEFORE deleting the old
+    # doc. If the upload fails after the delete lands, the replacement stays durably
+    # queued (claimed, then released rather than acked) instead of being lost — the
+    # queue processor's own idempotency check (old doc already gone) picks it up later
+    # without re-attempting the delete.
+    draft = QueueEntry(
+        project_id=pending["project_id"],
+        video_id=pending["video_id"],
+        file_name=pending["file_name"],
+        transcript=transcript,
+        chat_id=update.effective_chat.id,
+        video_title=pending["file_name"],
+        queued_at=datetime.now(UTC).isoformat(),
+        overwrite_doc_uuid=doc_uuid,
+    )
+    queue: Queue = context.bot_data["queue"]
+    escaped = escape_markdown(pending["file_name"], version=1)
+    try:
+        persisted = queue.enqueue(draft)
+    except Exception:
+        logger.exception("Failed to durably queue overwrite for %s", pending["file_name"])
+        await query.edit_message_text(
+            "Overwrite failed to queue durably — please retry the overwrite."
+        )
+        return
+    if persisted is None:
+        await query.edit_message_text(
+            f"Overwrite of *{escaped}* is already queued — run /refresh once it completes.",
+            parse_mode="Markdown",
+        )
+        return
+
+    claimed = queue.claim_by_id(persisted.id)
+    if claimed is None:
+        # A concurrent /refresh or token-update drain already claimed it — it will
+        # complete there; nothing left for this handler to do.
+        await query.edit_message_text(
+            f"Overwrite of *{escaped}* is already in progress — will confirm shortly.",
             parse_mode="Markdown",
         )
         return
@@ -524,57 +441,68 @@ async def handle_duplicate_choice(update: Update, context: CustomContext) -> Non
     logger.info("Overwriting %s in project %s", pending["file_name"], pending["project_id"])
     await query.edit_message_text("Overwriting...")
 
+    client = context.bot_data["claude_client"]
     try:
-        await asyncio.to_thread(
-            context.bot_data["claude_client"].delete_doc, pending["project_id"], doc_uuid
-        )
-        await asyncio.to_thread(
-            context.bot_data["claude_client"].upload_content,
-            pending["project_id"],
-            transcript,
-            pending["file_name"],
-        )
-    except AuthError:
-        if update.effective_chat is None:
-            return
-        entry = QueueEntry(
-            project_id=pending["project_id"],
-            video_id=pending["video_id"],
-            file_name=pending["file_name"],
-            transcript=transcript,
-            chat_id=update.effective_chat.id,
-            video_title=pending["file_name"],
-            queued_at=datetime.now(UTC).isoformat(),
-            overwrite_doc_uuid=doc_uuid,
-        )
-        try:
-            added = context.bot_data["queue"].enqueue(entry)
-        except Exception:
-            logger.exception("Failed to enqueue overwrite for %s", pending["file_name"])
-            await query.edit_message_text(
-                "Token expired and queuing failed — please resend the URL after updating the token."
-            )
-            return
-        escaped = escape_markdown(pending["file_name"], version=1)
-        if added:
-            msg = f"Token expired — *{escaped}* queued. Run /refresh after updating the token."
-        else:
-            msg = f"Token expired — *{escaped}* was already queued."
-        await query.edit_message_text(msg, parse_mode="Markdown")
+        docs: list[Doc] = await asyncio.to_thread(client.list_docs, claimed.project_id)
+    except AuthError as e:
+        queue.release(claimed.id)
+        await query.edit_message_text(f"Auth error — overwrite queued for retry: {e}")
         return
-    except Exception as e:
-        logger.exception("Overwrite failed for %s", pending["file_name"])
-        await query.edit_message_text(f"Overwrite failed: {e}")
+    except RequestException as e:
+        queue.release(claimed.id, increment_attempts=True)
+        await query.edit_message_text(
+            f"Failed to check project docs: {e}. Will retry automatically."
+        )
         return
 
+    if any(d["uuid"] == doc_uuid for d in docs):
+        try:
+            await asyncio.to_thread(client.delete_doc, claimed.project_id, doc_uuid)
+        except AuthError as e:
+            queue.release(claimed.id)
+            await query.edit_message_text(f"Auth error — overwrite queued for retry: {e}")
+            return
+        except RequestException as e:
+            queue.release(claimed.id, increment_attempts=True)
+            await query.edit_message_text(
+                f"Failed to delete the old doc: {e}. Will retry automatically."
+            )
+            return
+    elif any(d["file_name"] == claimed.file_name for d in docs):
+        # Old doc already gone and a replacement already exists: a prior attempt landed
+        # and we just never saw the confirmation. Don't upload a duplicate.
+        queue.ack(claimed.id)
+        context.user_data.pop(f"video_{msg_id_str}", None)
+        context.user_data.pop(f"pending_{msg_id_str}", None)
+        await query.edit_message_text(
+            f"*{escaped}* was already overwritten.", parse_mode="Markdown"
+        )
+        return
+
+    try:
+        await asyncio.to_thread(
+            client.upload_content, claimed.project_id, claimed.transcript, claimed.file_name
+        )
+    except AuthError as e:
+        queue.release(claimed.id)
+        await query.edit_message_text(
+            f"Auth error — old doc deleted, replacement queued for retry: {e}"
+        )
+        return
+    except RequestException as e:
+        queue.release(claimed.id, increment_attempts=True)
+        await query.edit_message_text(
+            f"Old doc deleted but the replacement upload failed: {e}. "
+            "It has been queued and will retry automatically."
+        )
+        return
+
+    queue.ack(claimed.id)
     context.user_data.pop(f"video_{msg_id_str}", None)
     context.user_data.pop(f"pending_{msg_id_str}", None)
 
     logger.info("Overwrite complete: %s -> project %s", pending["file_name"], pending["project_id"])
-    await query.edit_message_text(
-        f"Saved *{escape_markdown(pending['file_name'], version=1)}* to project.",
-        parse_mode="Markdown",
-    )
+    await query.edit_message_text(f"Saved *{escaped}* to project.", parse_mode="Markdown")
 
 
 def build_application(config: Config) -> Application:
@@ -588,7 +516,16 @@ def build_application(config: Config) -> Application:
     app.bot_data["claude_client"] = ClaudeClient(
         config.claude_session_token, persist_path=config.data_dir / "session_token.json"
     )
-    app.bot_data["queue"] = Queue(path=config.data_dir / "petition_queue.json")
+    queue = Queue(path=config.data_dir / "petition_queue.json")
+    recovered = queue.recover_abandoned()
+    if recovered:
+        logger.warning(
+            "Recovered %d abandoned in_flight queue entr%s from a prior run",
+            recovered,
+            "y" if recovered == 1 else "ies",
+        )
+    app.bot_data["queue"] = queue
+    app.bot_data["queue_processor"] = QueueProcessor(queue)
 
     app.add_handler(CommandHandler("start", cmd_start))
     app.add_handler(CommandHandler("help", cmd_help))

@@ -4,10 +4,11 @@ from pathlib import Path
 import pytest
 from curl_cffi.requests.exceptions import RequestException
 
-from knowledger.bot import MAX_UPLOAD_ATTEMPTS, drain_queue
+from knowledger.bot import drain_queue
 from knowledger.claude_client import AuthError
 from knowledger.config import Config, LoggerConfig
 from knowledger.queue import Queue, QueueEntry
+from knowledger.queue_processor import MAX_UPLOAD_ATTEMPTS, QueueProcessor
 
 
 class FakeBot:
@@ -49,7 +50,6 @@ class FakeClaudeClient:
             self.fail_upload_times -= 1
             raise RequestException("boom")
         self.docs.setdefault(project_id, []).append({"uuid": "u1", "file_name": file_name})
-        return {}
 
     def delete_doc(self, project_id, uuid):
         self.docs[project_id] = [d for d in self.docs.get(project_id, []) if d["uuid"] != uuid]
@@ -91,7 +91,7 @@ def test_success_notifies_and_drops_entry(tmp_path: Path) -> None:
     assert app.bot.sent == [(1, "Queued upload saved: *f1*")]
 
 
-def test_auth_error_requeues_silently_then_succeeds(tmp_path: Path) -> None:
+def test_auth_error_releases_silently_then_succeeds(tmp_path: Path) -> None:
     queue = Queue(path=tmp_path / "q.json")
     queue.enqueue(_entry("v2", "f2"))
     client = FakeClaudeClient()
@@ -101,6 +101,7 @@ def test_auth_error_requeues_silently_then_succeeds(tmp_path: Path) -> None:
     result = asyncio.run(drain_queue(app, _config(), client, queue))
     assert result.failed_auth == 1
     assert len(queue.peek()) == 1
+    assert queue.peek()[0].state == "pending"  # released, not lost
     assert app.bot.sent == []  # no message on auth failure
 
     result = asyncio.run(drain_queue(app, _config(), client, queue))
@@ -168,7 +169,7 @@ def test_overwrite_retry_after_lost_confirmation_is_not_duplicated(tmp_path: Pat
     assert len(client.docs["p"]) == 1
 
 
-def test_transient_list_docs_failure_requeues_overwrite_without_skipping_delete(
+def test_transient_list_docs_failure_releases_overwrite_without_skipping_delete(
     tmp_path: Path,
 ) -> None:
     """A transient list_docs failure must not be mistaken for 'the old doc is gone' — that
@@ -191,35 +192,86 @@ def test_transient_list_docs_failure_requeues_overwrite_without_skipping_delete(
     assert not any(d["uuid"] == "still-there" for d in client.docs["p"])
 
 
-def test_one_entrys_storage_failure_does_not_lose_the_rest_of_the_batch(tmp_path: Path) -> None:
-    """A per-entry requeue failure (e.g. disk full) must not abort processing of the other
-    entries already read from the queue this round."""
+def test_two_concurrent_drains_upload_an_entry_once(tmp_path: Path) -> None:
+    """A durable queue processor shared between callers (e.g. /refresh and a
+    token-update-triggered drain) must serialize whole-batch draining so overlapping
+    triggers cannot both claim and upload the same entry."""
+    queue = Queue(path=tmp_path / "q.json")
+    queue.enqueue(_entry("v8", "f8"))
+    client = FakeClaudeClient()
+    app = FakeTelegramApp()
+    processor = QueueProcessor(queue)
+
+    async def _run_both() -> tuple:
+        return await asyncio.gather(
+            processor.drain(app, _config(), client),
+            processor.drain(app, _config(), client),
+        )
+
+    results = asyncio.run(_run_both())
+
+    assert sum(r.uploaded for r in results) == 1
+    assert client.upload_calls == 1
+    assert queue.peek() == []
+
+
+def test_release_failure_propagates_and_does_not_lose_other_entries(tmp_path: Path) -> None:
+    """A persistence failure while releasing a claimed entry must propagate (not be
+    logged and swallowed) — but must not corrupt or drop entries that were never
+    touched this round; they remain durably queued for the next drain."""
 
     class FlakyQueue(Queue):
         def __init__(self, path: Path) -> None:
             super().__init__(path=path)
-            self.fail_next_enqueue = False
+            self.fail_next_release = False
 
-        def enqueue(self, entry: QueueEntry) -> bool:
-            if self.fail_next_enqueue:
-                self.fail_next_enqueue = False
+        def release(self, entry_id: str, *, increment_attempts: bool = False) -> None:
+            if self.fail_next_release:
+                self.fail_next_release = False
                 raise OSError("disk full")
-            return super().enqueue(entry)
+            super().release(entry_id, increment_attempts=increment_attempts)
 
     queue = FlakyQueue(path=tmp_path / "q.json")
     client = FakeClaudeClient()
-    client.fail_auth_times = 2  # both entries fail with auth error -> both attempt requeue
+    client.fail_auth_times = 2  # both entries would fail with auth error -> release
     queue.enqueue(_entry("vA", "fA"))
     queue.enqueue(_entry("vB", "fB"))
-    queue.fail_next_enqueue = True  # first requeue attempt (entry A) fails
+    queue.fail_next_release = True  # entry A's release fails
     app = FakeTelegramApp()
 
-    result = asyncio.run(drain_queue(app, _config(), client, queue))
+    with pytest.raises(OSError):
+        asyncio.run(drain_queue(app, _config(), client, queue))
 
-    assert result.failed_auth == 2
-    remaining = queue.peek()
-    assert len(remaining) == 1
-    assert remaining[0].video_id == "vB"  # A was lost, B survived
+    # Nothing was lost: A is still claimed (in_flight) as of the crash, B untouched.
+    remaining = {e.video_id: e for e in queue.peek()}
+    assert set(remaining) == {"vA", "vB"}
+
+    # A fresh drain recovers the abandoned claim and both entries eventually succeed.
+    queue.recover_abandoned()
+    client.fail_auth_times = 0
+    result = asyncio.run(drain_queue(app, _config(), client, queue))
+    assert result.uploaded == 2
+
+
+def test_claim_recovers_abandoned_in_flight_entry_after_simulated_crash(tmp_path: Path) -> None:
+    """A process restart (a fresh Queue instance over the same file) must recover a
+    claim left in_flight by a crash — not treat it as invisible/stuck forever."""
+    path = tmp_path / "q.json"
+    queue = Queue(path=path)
+    queue.enqueue(_entry("v9", "f9"))
+    claimed = queue.claim()
+    assert claimed is not None
+    assert claimed.state == "in_flight"
+
+    # Simulate the process crashing here (never ack'd/released) and restarting.
+    restarted = Queue(path=path)
+    recovered_count = restarted.recover_abandoned()
+    assert recovered_count == 1
+    assert restarted.peek()[0].state == "pending"
+
+    reclaimed = restarted.claim()
+    assert reclaimed is not None
+    assert reclaimed.video_id == "v9"
 
 
 if __name__ == "__main__":
