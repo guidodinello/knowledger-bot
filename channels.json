@@ -1,5 +1,7 @@
 [
   { "handle": "@cryptocurrentlyYT", "name": "Crypto Currently", "channel_id": "UC9Mq8PDBT2cFf5mj7_fQTgg" },
   { "handle": "@OnChainMind", "name": "On Chain Mind", "channel_id": "UCbs3kIX9ddwnDmGEo3Mwbew" },
-  { "handle": "@JoseLuisCavatv", "name": "José Luis Cava", "channel_id": "UCvCCLJkQpRg0NdT3zNcI08A" }
+  { "handle": "@JoseLuisCavatv", "name": "José Luis Cava", "channel_id": "UCvCCLJkQpRg0NdT3zNcI08A" },
+  { "handle": "@NeuronaNews", "name": "Neurona News", "channel_id": "UCE6qFi3uDmbxTJqQutMdfLw" },
+  { "handle": "@NeuronaFinancieraOK", "name": "Neurona Financiera", "channel_id": "UCPmD-5y1a78hK6ADMZe0I_Q" }
 ]
