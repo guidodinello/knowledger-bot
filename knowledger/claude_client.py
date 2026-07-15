@@ -105,7 +105,9 @@ class ClaudeClient:
         silently reverting any token updated live via update_token() since boot."""
         tmp = path.with_suffix(".tmp")
         try:
-            tmp.write_text(json.dumps({"token": session_token}), encoding="utf-8")
+            fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+            with os.fdopen(fd, "w", encoding="utf-8") as f:
+                f.write(json.dumps({"token": session_token}))
             os.replace(tmp, path)
         except OSError:
             logger.exception("Failed to persist updated token to %s", path)

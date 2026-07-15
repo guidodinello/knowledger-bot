@@ -50,6 +50,13 @@ def test_update_token_with_persist_path_writes_through(tmp_path: Path) -> None:
     assert json.loads(persist_path.read_text()) == {"token": "fresh-token-123"}
 
 
+def test_persisted_token_file_is_owner_only_readable(tmp_path: Path) -> None:
+    persist_path = tmp_path / "session_token.json"
+    ClaudeClient("initial", persist_path=persist_path).update_token("fresh-token-123")
+
+    assert (persist_path.stat().st_mode & 0o777) == 0o600
+
+
 def test_load_config_falls_back_to_env_var_when_no_persisted_token(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
