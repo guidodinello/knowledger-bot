@@ -124,11 +124,29 @@ async def _drain_and_retry_queue(chat_id: int, context: CustomContext) -> None:
     if not entries:
         return
 
+    client = context.bot_data["claude_client"]
+    docs_by_project: dict[str, list[Doc]] = {}
     failed = []
     for entry in entries:
+        if entry.project_id not in docs_by_project:
+            try:
+                docs_by_project[entry.project_id] = await asyncio.to_thread(
+                    client.list_docs, entry.project_id
+                )
+            except AuthError:
+                failed.append(entry)
+                continue
+            except Exception:
+                logger.exception("Failed to list docs for project %s", entry.project_id)
+                docs_by_project[entry.project_id] = []
+
+        if any(d["file_name"] == entry.file_name for d in docs_by_project[entry.project_id]):
+            logger.info("Queued entry already uploaded, skipping: %s", entry.file_name)
+            continue
+
         try:
             await asyncio.to_thread(
-                context.bot_data["claude_client"].upload_content,
+                client.upload_content,
                 entry.project_id,
                 entry.transcript,
                 entry.file_name,

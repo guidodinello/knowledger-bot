@@ -38,6 +38,15 @@ class Queue:
             self._save([])
         return entries
 
+    def remove(self, project_id: str, video_id: str) -> None:
+        """Drop any entry for this project/video pair. No-op if none is queued."""
+        entries = self._load()
+        remaining = [
+            e for e in entries if not (e.project_id == project_id and e.video_id == video_id)
+        ]
+        if len(remaining) != len(entries):
+            self._save(remaining)
+
     def _load(self) -> list[QueueEntry]:
         try:
             return [
