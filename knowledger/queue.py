@@ -17,6 +17,8 @@ class QueueEntry:
     chat_id: int
     video_title: str
     queued_at: str  # ISO-8601, for display only
+    upload_attempts: int = 0  # consecutive non-auth retry failures, for the stuck-entry alert
+    overwrite_doc_uuid: str | None = None  # set for an overwrite retry: delete this doc first
 
 
 @dataclass(slots=True)

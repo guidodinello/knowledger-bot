@@ -1,4 +1,5 @@
 import asyncio
+from dataclasses import dataclass, replace
 from datetime import UTC, datetime
 from functools import wraps
 from typing import Any, TypedDict
@@ -19,6 +20,8 @@ from telegram.helpers import escape_markdown
 from .claude_client import AuthError, ClaudeClient, Doc, Project
 from .config import Config
 from .logger import get_logger
+from .notify import notify
+from .poller import MAX_UPLOAD_ATTEMPTS
 from .queue import Queue, QueueEntry
 from .transcript import fetch_transcript
 from .youtube import VideoMetadata, build_doc_name, extract_video_id, fetch_video_metadata
@@ -116,17 +119,80 @@ async def cmd_refresh(update: Update, context: CustomContext) -> None:
         await update.message.reply_text(f"Refresh failed: {e}")
         return
 
-    await _drain_and_retry_queue(update.effective_chat.id, context)
+    result = await drain_queue(
+        context.application, context.bot_data["config"], client, context.bot_data["queue"]
+    )
+    if result.uploaded or result.already_existed or result.failed_auth or result.failed_other:
+        parts = [f"{result.uploaded} queued upload(s) saved"]
+        if result.already_existed:
+            parts.append(f"{result.already_existed} already existed")
+        if result.failed_auth:
+            parts.append(f"{result.failed_auth} still failing (auth)")
+        if result.failed_other:
+            parts.append(f"{result.failed_other} still failing (other)")
+        await update.message.reply_text(", ".join(parts) + ".")
 
 
-async def _drain_and_retry_queue(chat_id: int, context: CustomContext) -> None:
-    entries = context.bot_data["queue"].drain()
-    if not entries:
+@dataclass(slots=True)
+class DrainResult:
+    uploaded: int = 0
+    already_existed: int = 0
+    failed_auth: int = 0
+    failed_other: int = 0
+
+
+async def _upload_and_track(
+    telegram_app: Application,
+    config: Config,
+    client: ClaudeClient,
+    queue: Queue,
+    entry: QueueEntry,
+    result: DrainResult,
+) -> None:
+    """Attempt entry's upload. On success, notify the original chat and drop it from the
+    queue. On an auth error, requeue silently — this is the expected case until the token
+    is fixed. On anything else, requeue with an incremented attempt count and alert every
+    MAX_UPLOAD_ATTEMPTS attempts, so a genuinely broken entry doesn't fail invisibly forever."""
+    try:
+        await asyncio.to_thread(
+            client.upload_content, entry.project_id, entry.transcript, entry.file_name
+        )
+    except AuthError:
+        queue.enqueue(entry)
+        result.failed_auth += 1
+        return
+    except Exception:
+        logger.exception("Queue retry failed for %s", entry.file_name)
+        attempts = entry.upload_attempts + 1
+        queue.enqueue(replace(entry, upload_attempts=attempts))
+        if attempts % MAX_UPLOAD_ATTEMPTS == 0:
+            await notify(
+                telegram_app,
+                config,
+                f"🛑 Queued upload stuck for “{entry.file_name}” — failed {attempts}x in a "
+                "row. Check logs; it will keep retrying.",
+            )
+        result.failed_other += 1
         return
 
-    client = context.bot_data["claude_client"]
+    result.uploaded += 1
+    escaped = escape_markdown(entry.file_name, version=1)
+    await telegram_app.bot.send_message(
+        entry.chat_id, f"Queued upload saved: *{escaped}*", parse_mode="Markdown"
+    )
+
+
+async def drain_queue(
+    telegram_app: Application, config: Config, client: ClaudeClient, queue: Queue
+) -> DrainResult:
+    """Attempt every queued entry once — auth-fallback uploads and overwrites alike. Called
+    both from /refresh (manual) and automatically the moment the Claude token is updated."""
+    entries = queue.drain()
+    result = DrainResult()
+    if not entries:
+        return result
+
     docs_by_project: dict[str, list[Doc]] = {}
-    failed = []
     for entry in entries:
         if entry.project_id not in docs_by_project:
             try:
@@ -134,51 +200,50 @@ async def _drain_and_retry_queue(chat_id: int, context: CustomContext) -> None:
                     client.list_docs, entry.project_id
                 )
             except AuthError:
-                failed.append(entry)
+                queue.enqueue(entry)
+                result.failed_auth += 1
                 continue
             except Exception:
                 logger.exception("Failed to list docs for project %s", entry.project_id)
                 docs_by_project[entry.project_id] = []
+        docs = docs_by_project[entry.project_id]
 
-        if any(d["file_name"] == entry.file_name for d in docs_by_project[entry.project_id]):
+        if entry.overwrite_doc_uuid is not None:
+            # The delete may have already landed on a prior attempt — check first so a
+            # retry never re-deletes (or 404s trying to delete) an already-gone doc.
+            if any(d["uuid"] == entry.overwrite_doc_uuid for d in docs):
+                try:
+                    await asyncio.to_thread(
+                        client.delete_doc, entry.project_id, entry.overwrite_doc_uuid
+                    )
+                except AuthError:
+                    queue.enqueue(entry)
+                    result.failed_auth += 1
+                    continue
+                except Exception:
+                    logger.exception("Queued delete failed for %s", entry.file_name)
+                    attempts = entry.upload_attempts + 1
+                    queue.enqueue(replace(entry, upload_attempts=attempts))
+                    if attempts % MAX_UPLOAD_ATTEMPTS == 0:
+                        await notify(
+                            telegram_app,
+                            config,
+                            f"🛑 Queued overwrite stuck for “{entry.file_name}” — failed "
+                            f"{attempts}x in a row deleting the old doc. Check logs.",
+                        )
+                    result.failed_other += 1
+                    continue
+            await _upload_and_track(telegram_app, config, client, queue, entry, result)
+            continue
+
+        if any(d["file_name"] == entry.file_name for d in docs):
             logger.info("Queued entry already uploaded, skipping: %s", entry.file_name)
+            result.already_existed += 1
             continue
 
-        try:
-            await asyncio.to_thread(
-                client.upload_content,
-                entry.project_id,
-                entry.transcript,
-                entry.file_name,
-            )
-        except AuthError:
-            failed.append(entry)
-            continue
-        except Exception:
-            logger.exception("Queue retry failed for %s", entry.file_name)
-            failed.append(entry)
-            continue
-        escaped = escape_markdown(entry.file_name, version=1)
-        await context.bot.send_message(
-            entry.chat_id,
-            f"Queued upload saved: *{escaped}*",
-            parse_mode="Markdown",
-        )
+        await _upload_and_track(telegram_app, config, client, queue, entry, result)
 
-    could_not_reenqueue = []
-    for entry in failed:
-        try:
-            context.bot_data["queue"].enqueue(entry)
-        except Exception:
-            logger.exception("Failed to re-enqueue %s", entry.file_name)
-            could_not_reenqueue.append(entry)
-
-    summary = f"{len(entries) - len(failed)}/{len(entries)} queued upload(s) processed."
-    if failed:
-        summary += f" {len(failed)} failed and re-queued."
-    if could_not_reenqueue:
-        summary += f" Warning: {len(could_not_reenqueue)} could not be re-queued (storage error)."
-    await context.bot.send_message(chat_id, summary)
+    return result
 
 
 @_require_auth
@@ -424,8 +489,33 @@ async def handle_duplicate_choice(update: Update, context: CustomContext) -> Non
             transcript,
             pending["file_name"],
         )
-    except AuthError as e:
-        await query.edit_message_text(f"Auth error: {e}")
+    except AuthError:
+        if update.effective_chat is None:
+            return
+        entry = QueueEntry(
+            project_id=pending["project_id"],
+            video_id=pending["video_id"],
+            file_name=pending["file_name"],
+            transcript=transcript,
+            chat_id=update.effective_chat.id,
+            video_title=pending["file_name"],
+            queued_at=datetime.now(UTC).isoformat(),
+            overwrite_doc_uuid=doc_uuid,
+        )
+        try:
+            added = context.bot_data["queue"].enqueue(entry)
+        except Exception:
+            logger.exception("Failed to enqueue overwrite for %s", pending["file_name"])
+            await query.edit_message_text(
+                "Token expired and queuing failed — please resend the URL after updating the token."
+            )
+            return
+        escaped = escape_markdown(pending["file_name"], version=1)
+        if added:
+            msg = f"Token expired — *{escaped}* queued. Run /refresh after updating the token."
+        else:
+            msg = f"Token expired — *{escaped}* was already queued."
+        await query.edit_message_text(msg, parse_mode="Markdown")
         return
     except Exception as e:
         logger.exception("Overwrite failed for %s", pending["file_name"])

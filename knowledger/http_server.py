@@ -3,11 +3,24 @@ import hmac
 
 from aiohttp import web
 from aiohttp.web_middlewares import middleware
+from telegram.ext import Application
 
+from .bot import drain_queue
 from .claude_client import AuthError, ClaudeClient, get_org_id_for_token
+from .config import Config
 from .logger import get_logger
+from .queue import Queue
 
 logger = get_logger(__name__)
+
+# Keep references so these fire-and-forget drains can't be garbage-collected mid-run.
+_background_tasks: set[asyncio.Task] = set()
+
+
+def _run_in_background(coro) -> None:
+    task = asyncio.create_task(coro)
+    _background_tasks.add(task)
+    task.add_done_callback(_background_tasks.discard)
 
 
 async def _handle_update_token(request: web.Request) -> web.Response:
@@ -46,6 +59,12 @@ async def _handle_update_token(request: web.Request) -> web.Response:
 
     client.update_token(new_token)
     logger.info("Token updated via HTTP endpoint")
+
+    telegram_app: Application = request.app["telegram_app"]
+    config: Config = request.app["config"]
+    queue: Queue = request.app["queue"]
+    _run_in_background(drain_queue(telegram_app, config, client, queue))
+
     return web.json_response({"status": "ok"})
 
 
@@ -69,12 +88,18 @@ def _make_cors_middleware(allowed_origin: str):
 
 def build_aiohttp_app(
     client: ClaudeClient,
+    queue: Queue,
+    telegram_app: Application,
+    config: Config,
     secret: str,
     personal_org_id: str | None,
     cors_allowed_origin: str = "*",
 ) -> web.Application:
     app = web.Application(middlewares=[_make_cors_middleware(cors_allowed_origin)])
     app["claude_client"] = client
+    app["queue"] = queue
+    app["telegram_app"] = telegram_app
+    app["config"] = config
     app["token_update_secret"] = secret
     app["personal_org_id"] = personal_org_id
     app.router.add_post("/update-token", _handle_update_token)
