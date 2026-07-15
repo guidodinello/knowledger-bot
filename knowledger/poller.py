@@ -67,6 +67,7 @@ class PollerState:
     path: Path
     seen: set[str] = field(default_factory=set)
     pending: list[PendingVideo] = field(default_factory=list)
+    auth_error_notified: bool = False  # in-memory only; not persisted to disk
 
     @classmethod
     def load(cls, path: Path) -> "PollerState":
@@ -339,7 +340,18 @@ async def _tick(
         project_id = await asyncio.to_thread(_resolve_project, client, project_name)
     except AuthError:
         logger.warning("Auth error resolving project; skipping processing this tick")
+        if not state.auth_error_notified:
+            state.auth_error_notified = True
+            await _notify(
+                app,
+                config,
+                "⚠️ Claude session token expired — poller is paused. "
+                "Update the token (e.g. via /update-token) to resume.",
+            )
         return
+    if state.auth_error_notified:
+        state.auth_error_notified = False
+        await _notify(app, config, "✅ Claude session token restored — poller resumed.")
     if project_id is None:
         return
 
