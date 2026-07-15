@@ -1,3 +1,4 @@
+import json
 import os
 from dataclasses import dataclass, field
 from datetime import date
@@ -8,6 +9,21 @@ from dotenv import load_dotenv
 from .logger import get_logger
 
 logger = get_logger(__name__)
+
+
+def _load_persisted_token(data_dir: Path) -> str | None:
+    """Read a token written by ClaudeClient.update_token() on a prior run — takes priority
+    over CLAUDE_SESSION_TOKEN so a live token update survives the next restart instead of
+    being silently reverted to whatever's baked into the env var."""
+    path = data_dir / "session_token.json"
+    try:
+        token = json.loads(path.read_text(encoding="utf-8")).get("token")
+    except FileNotFoundError:
+        return None
+    except Exception:
+        logger.warning("Persisted token file %s is corrupt or unreadable", path, exc_info=True)
+        return None
+    return token.strip() if isinstance(token, str) and token.strip() else None
 
 
 @dataclass(frozen=True, slots=True)
@@ -47,9 +63,10 @@ def load_config() -> Config:
     if not token:
         raise ValueError("TELEGRAM_BOT_TOKEN is required")
 
-    session = os.getenv("CLAUDE_SESSION_TOKEN")
+    data_dir = Path(os.getenv("DATA_DIR", "."))
+    session = _load_persisted_token(data_dir) or os.getenv("CLAUDE_SESSION_TOKEN")
     if not session:
-        raise ValueError("CLAUDE_SESSION_TOKEN is required")
+        raise ValueError("CLAUDE_SESSION_TOKEN is required (or a persisted token in DATA_DIR)")
 
     raw_ids = os.getenv("ALLOWED_USER_IDS")
     if not raw_ids:
@@ -108,7 +125,7 @@ def load_config() -> Config:
         auto_transcript_project=os.getenv("AUTO_TRANSCRIPT_PROJECT") or None,
         channels_path=Path(os.getenv("CHANNELS_PATH", "channels.json")),
         poll_interval=poll_interval,
-        data_dir=Path(os.getenv("DATA_DIR", ".")),
+        data_dir=data_dir,
         cors_allowed_origin=os.getenv("CORS_ALLOWED_ORIGIN") or "*",
         logger=logger_config,
     )
