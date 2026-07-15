@@ -19,6 +19,7 @@ from telegram.helpers import escape_markdown
 from .claude_client import AuthError, ClaudeClient, Doc, Project
 from .config import Config
 from .logger import get_logger
+from .persistence import PersistenceError
 from .queue import Queue, QueueEntry
 from .queue_processor import DrainResult, QueueProcessor
 from .transcript import TranscriptTransportError, TranscriptUnavailable, fetch_transcript
@@ -415,7 +416,7 @@ async def handle_duplicate_choice(update: Update, context: CustomContext) -> Non
     escaped = escape_markdown(pending["file_name"], version=1)
     try:
         persisted = queue.enqueue(draft)
-    except Exception:
+    except PersistenceError:
         logger.exception("Failed to durably queue overwrite for %s", pending["file_name"])
         await query.edit_message_text(
             "Overwrite failed to queue durably — please retry the overwrite."
@@ -443,21 +444,8 @@ async def handle_duplicate_choice(update: Update, context: CustomContext) -> Non
 
     client = context.bot_data["claude_client"]
     try:
-        docs: list[Doc] = await asyncio.to_thread(client.list_docs, claimed.project_id)
-    except AuthError as e:
-        queue.release(claimed.id)
-        await query.edit_message_text(f"Auth error — overwrite queued for retry: {e}")
-        return
-    except RequestException as e:
-        queue.release(claimed.id, increment_attempts=True)
-        await query.edit_message_text(
-            f"Failed to check project docs: {e}. Will retry automatically."
-        )
-        return
-
-    if any(d["uuid"] == doc_uuid for d in docs):
         try:
-            await asyncio.to_thread(client.delete_doc, claimed.project_id, doc_uuid)
+            docs: list[Doc] = await asyncio.to_thread(client.list_docs, claimed.project_id)
         except AuthError as e:
             queue.release(claimed.id)
             await query.edit_message_text(f"Auth error — overwrite queued for retry: {e}")
@@ -465,44 +453,71 @@ async def handle_duplicate_choice(update: Update, context: CustomContext) -> Non
         except RequestException as e:
             queue.release(claimed.id, increment_attempts=True)
             await query.edit_message_text(
-                f"Failed to delete the old doc: {e}. Will retry automatically."
+                f"Failed to check project docs: {e}. Will retry automatically."
             )
             return
-    elif any(d["file_name"] == claimed.file_name for d in docs):
-        # Old doc already gone and a replacement already exists: a prior attempt landed
-        # and we just never saw the confirmation. Don't upload a duplicate.
-        queue.ack(claimed.id)
-        context.user_data.pop(f"video_{msg_id_str}", None)
-        context.user_data.pop(f"pending_{msg_id_str}", None)
-        await query.edit_message_text(
-            f"*{escaped}* was already overwritten.", parse_mode="Markdown"
-        )
-        return
 
-    try:
-        await asyncio.to_thread(
-            client.upload_content, claimed.project_id, claimed.transcript, claimed.file_name
+        if any(d["uuid"] == doc_uuid for d in docs):
+            try:
+                await asyncio.to_thread(client.delete_doc, claimed.project_id, doc_uuid)
+            except AuthError as e:
+                queue.release(claimed.id)
+                await query.edit_message_text(f"Auth error — overwrite queued for retry: {e}")
+                return
+            except RequestException as e:
+                queue.release(claimed.id, increment_attempts=True)
+                await query.edit_message_text(
+                    f"Failed to delete the old doc: {e}. Will retry automatically."
+                )
+                return
+        elif any(d["file_name"] == claimed.file_name for d in docs):
+            # Old doc already gone and a replacement already exists: a prior attempt
+            # landed and we just never saw the confirmation. Don't upload a duplicate.
+            queue.ack(claimed.id)
+            await query.edit_message_text(
+                f"*{escaped}* was already overwritten.", parse_mode="Markdown"
+            )
+            return
+
+        try:
+            await asyncio.to_thread(
+                client.upload_content, claimed.project_id, claimed.transcript, claimed.file_name
+            )
+        except AuthError as e:
+            queue.release(claimed.id)
+            await query.edit_message_text(
+                f"Auth error — old doc deleted, replacement queued for retry: {e}"
+            )
+            return
+        except RequestException as e:
+            queue.release(claimed.id, increment_attempts=True)
+            await query.edit_message_text(
+                f"Old doc deleted but the replacement upload failed: {e}. "
+                "It has been queued and will retry automatically."
+            )
+            return
+
+        queue.ack(claimed.id)
+        logger.info(
+            "Overwrite complete: %s -> project %s", pending["file_name"], pending["project_id"]
         )
-    except AuthError as e:
-        queue.release(claimed.id)
-        await query.edit_message_text(
-            f"Auth error — old doc deleted, replacement queued for retry: {e}"
-        )
-        return
-    except RequestException as e:
+        await query.edit_message_text(f"Saved *{escaped}* to project.", parse_mode="Markdown")
+    except Exception:
+        # Anything unexpected (a programming error, a malformed API response) must
+        # still release the claim — otherwise the entry is stuck in_flight until the
+        # next process restart's recover_abandoned(), instead of being retried by the
+        # very next drain.
+        logger.exception("Unexpected error during overwrite for %s", claimed.file_name)
         queue.release(claimed.id, increment_attempts=True)
         await query.edit_message_text(
-            f"Old doc deleted but the replacement upload failed: {e}. "
-            "It has been queued and will retry automatically."
+            "Unexpected error during overwrite — it has been queued and will retry automatically."
         )
-        return
-
-    queue.ack(claimed.id)
-    context.user_data.pop(f"video_{msg_id_str}", None)
-    context.user_data.pop(f"pending_{msg_id_str}", None)
-
-    logger.info("Overwrite complete: %s -> project %s", pending["file_name"], pending["project_id"])
-    await query.edit_message_text(f"Saved *{escaped}* to project.", parse_mode="Markdown")
+    finally:
+        # The durable QueueEntry (not this dict) now owns retry state regardless of
+        # outcome, so this Telegram-interaction bookkeeping is stale the moment we
+        # reach here on any exit path — success, failure, or unexpected exception.
+        context.user_data.pop(f"video_{msg_id_str}", None)
+        context.user_data.pop(f"pending_{msg_id_str}", None)
 
 
 def build_application(config: Config) -> Application:

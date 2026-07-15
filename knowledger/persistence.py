@@ -48,13 +48,23 @@ def load_json(path: Path) -> Any | None:
         raise CorruptDataError(path, f"not valid JSON: {e}") from e
 
 
-def atomic_write_json(path: Path, data: Any) -> None:
+def atomic_write_json(path: Path, data: Any, *, mode: int | None = None) -> None:
     """Write `data` as JSON to `path` atomically (same-directory temp file + os.replace).
     On failure, the destination is left untouched and the temp file is cleaned up where
-    possible; the failure always propagates as PersistenceIOError."""
+    possible; the failure always propagates as PersistenceIOError.
+
+    `mode`, if given, sets the temp file's permissions at creation (e.g. 0o600 for a
+    sensitive file like a credential) — the default `Path.write_text()` path creates
+    the file with umask-default permissions, which os.replace() would then carry over
+    to the destination."""
     tmp = path.with_suffix(".tmp")
     try:
-        tmp.write_text(json.dumps(data, indent=2), encoding="utf-8")
+        if mode is not None:
+            fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, mode)
+            with os.fdopen(fd, "w", encoding="utf-8") as f:
+                f.write(json.dumps(data, indent=2))
+        else:
+            tmp.write_text(json.dumps(data, indent=2), encoding="utf-8")
         os.replace(tmp, path)
     except OSError as e:
         with suppress(OSError):

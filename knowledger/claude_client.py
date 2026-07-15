@@ -1,6 +1,4 @@
 import json
-import os
-from contextlib import suppress
 from http import HTTPStatus
 from pathlib import Path
 from typing import TypedDict
@@ -8,6 +6,7 @@ from typing import TypedDict
 from curl_cffi import requests
 
 from .logger import get_logger
+from .persistence import PersistenceIOError, atomic_write_json
 
 logger = get_logger(__name__)
 
@@ -113,16 +112,14 @@ class ClaudeClient:
 
     @staticmethod
     def _persist_token(path: Path, session_token: str) -> None:
-        tmp = path.with_suffix(".tmp")
+        """Delegates to the shared atomic-JSON writer (owner-only permissions, since this
+        is a credential) rather than reimplementing the temp-file-plus-replace pattern —
+        one place owns the durable-write mechanics. Re-raised as OSError, matching the
+        contract update_token() callers (e.g. the HTTP token endpoint) already expect."""
         try:
-            fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
-            with os.fdopen(fd, "w", encoding="utf-8") as f:
-                f.write(json.dumps({"token": session_token}))
-            os.replace(tmp, path)
-        except OSError:
-            with suppress(OSError):
-                tmp.unlink()
-            raise
+            atomic_write_json(path, {"token": session_token}, mode=0o600)
+        except PersistenceIOError as e:
+            raise OSError(str(e)) from e
 
     def list_docs(self, project_id: str) -> list[Doc]:
         response = requests.get(

@@ -83,22 +83,19 @@ class Queue:
         return count
 
     def claim(self, exclude: frozenset[str] = frozenset()) -> QueueEntry | None:
-        """Atomically pick one pending entry (not in `exclude`), mark it in_flight, and
-        persist that claim before returning it. Self-heals any stale in_flight entries
-        left by a prior crash (see recover_abandoned) before picking. Returns None if
-        there is nothing eligible to claim."""
+        """Atomically pick one pending entry (not in `exclude`) and mark it in_flight,
+        persisting the claim before returning it. Does NOT touch existing in_flight
+        entries — those may be legitimately claimed elsewhere in this same process
+        (e.g. claim_by_id()), so resetting them here on every call would race with
+        whoever holds that claim. Recovering in_flight entries abandoned by a prior
+        process's crash is recover_abandoned()'s job, called once at startup. Returns
+        None if there is nothing eligible to claim."""
         entries = self._load()
-        normalized = [
-            replace(e, state=PENDING, claimed_at=None) if e.state == IN_FLIGHT else e
-            for e in entries
-        ]
-        target = next((e for e in normalized if e.state == PENDING and e.id not in exclude), None)
+        target = next((e for e in entries if e.state == PENDING and e.id not in exclude), None)
         if target is None:
-            if normalized != entries:
-                self._save(normalized)
             return None
         claimed = replace(target, state=IN_FLIGHT, claimed_at=datetime.now(UTC).isoformat())
-        self._save([claimed if e.id == claimed.id else e for e in normalized])
+        self._save([claimed if e.id == claimed.id else e for e in entries])
         return claimed
 
     def claim_by_id(self, entry_id: str) -> QueueEntry | None:

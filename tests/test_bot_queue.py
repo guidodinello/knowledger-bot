@@ -274,5 +274,26 @@ def test_claim_recovers_abandoned_in_flight_entry_after_simulated_crash(tmp_path
     assert reclaimed.video_id == "v9"
 
 
+def test_claim_does_not_reset_an_entry_in_flight_via_claim_by_id(tmp_path: Path) -> None:
+    """claim() must never touch an entry already legitimately in_flight elsewhere in
+    the same process (e.g. bot.py's interactive-overwrite path calls claim_by_id()
+    outside the QueueProcessor lock). Resetting it back to pending — as a prior,
+    buggy version of claim() did on every call to self-heal crash leftovers — would
+    let a concurrent drain re-claim and double-process the same entry."""
+    path = tmp_path / "q.json"
+    queue = Queue(path=path)
+    persisted = queue.enqueue(_entry("v9", "f9"))
+    assert persisted is not None
+
+    held = queue.claim_by_id(persisted.id)
+    assert held is not None
+    assert held.state == "in_flight"
+
+    # A concurrent drain's claim() call must find nothing pending — not reset and
+    # re-claim the entry `held` is still working on.
+    assert queue.claim() is None
+    assert queue.peek()[0].state == "in_flight"
+
+
 if __name__ == "__main__":
     raise SystemExit(pytest.main([__file__, "-v"]))
