@@ -5,23 +5,33 @@ from aiohttp import web
 from aiohttp.web_middlewares import middleware
 from telegram.ext import Application
 
-from .bot import drain_queue
 from .claude_client import AuthError, ClaudeClient, get_org_id_for_token
 from .config import Config
 from .logger import get_logger
-from .queue import Queue
+from .queue_processor import QueueProcessor
 
 logger = get_logger(__name__)
 
 
+def _log_background_task_result(task: asyncio.Task) -> None:
+    """Observe a background task's outcome as soon as it finishes, rather than only at
+    server shutdown — an unobserved exception here would otherwise be silently discarded."""
+    if task.cancelled():
+        return
+    exc = task.exception()
+    if exc is not None:
+        logger.error("Background queue-drain task failed", exc_info=exc)
+
+
 def _run_in_background(app: web.Application, coro) -> None:
     """Fire-and-forget, but owned by the app: kept alive against GC while running, and
-    awaited on shutdown so cleanup mid-drain doesn't just abandon it. drain_queue() itself
-    is safe to cancel — it removes each queue entry right before processing it, so at most
-    the single entry in flight is at risk, not the whole batch."""
+    awaited on shutdown so cleanup mid-drain doesn't abandon it. QueueProcessor.drain()
+    itself is safe to cancel — each entry is claimed (and durably persisted as in_flight)
+    right before it's processed, so at most the single entry in flight is at risk."""
     task = asyncio.create_task(coro)
     app["background_tasks"].add(task)
     task.add_done_callback(app["background_tasks"].discard)
+    task.add_done_callback(_log_background_task_result)
 
 
 async def _await_background_tasks(app: web.Application) -> None:
@@ -64,13 +74,17 @@ async def _handle_update_token(request: web.Request) -> web.Response:
             logger.warning("Rejected token for org %s (expected %s)", org_id, personal_org_id)
             return web.json_response({"error": "token belongs to wrong account"}, status=403)
 
-    client.update_token(new_token)
+    try:
+        client.update_token(new_token)
+    except OSError:
+        logger.exception("Failed to persist updated token")
+        return web.json_response({"error": "failed to persist token"}, status=500)
     logger.info("Token updated via HTTP endpoint")
 
     telegram_app: Application = request.app["telegram_app"]
     config: Config = request.app["config"]
-    queue: Queue = request.app["queue"]
-    _run_in_background(request.app, drain_queue(telegram_app, config, client, queue))
+    processor: QueueProcessor = request.app["queue_processor"]
+    _run_in_background(request.app, processor.drain(telegram_app, config, client))
 
     return web.json_response({"status": "ok"})
 
@@ -95,7 +109,7 @@ def _make_cors_middleware(allowed_origin: str):
 
 def build_aiohttp_app(
     client: ClaudeClient,
-    queue: Queue,
+    processor: QueueProcessor,
     telegram_app: Application,
     config: Config,
     secret: str,
@@ -104,7 +118,7 @@ def build_aiohttp_app(
 ) -> web.Application:
     app = web.Application(middlewares=[_make_cors_middleware(cors_allowed_origin)])
     app["claude_client"] = client
-    app["queue"] = queue
+    app["queue_processor"] = processor
     app["telegram_app"] = telegram_app
     app["config"] = config
     app["token_update_secret"] = secret

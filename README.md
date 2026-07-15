@@ -79,5 +79,24 @@ To find your `PERSONAL_ORG_ID`: while logged into your personal claude.ai accoun
 ## Notes
 
 - The project list is cached at startup; use `/refresh` to pick up new projects without restarting.
-- Videos without captions will report "no transcript available".
+- Videos without captions will report "no transcript available". A blocked/temporarily-failed transcript request is reported separately and retried — it is never treated as "no captions available".
 - Failed uploads (e.g. due to an expired token) are queued and retried automatically after a successful token update.
+
+### Upgrading to the durable queue (breaking change)
+
+The upload queue's on-disk format (`petition_queue.json` under `DATA_DIR`) changed from a
+plain JSON array to a versioned object with per-entry claim state, to make queue draining
+crash-safe and immune to double-uploads. **There is no automatic migration.** If the file
+exists in the old array format, the new version will fail to start (a clear, path-specific
+error) rather than silently discarding it.
+
+Before deploying this version, drain the queue to empty on the version currently running —
+repeat `/refresh` from Telegram (or wait for a token-update-triggered drain) until it
+reports nothing left to upload, then confirm on the host:
+
+```bash
+cat "$DATA_DIR/petition_queue.json"   # safe to deploy once this is missing or an empty array
+```
+
+If the file doesn't exist, or is already `[]`, there is nothing to convert and you can
+deploy normally.

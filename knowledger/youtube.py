@@ -1,7 +1,7 @@
-import html
 import logging
 import re
 from dataclasses import dataclass
+from html.parser import HTMLParser
 from urllib.parse import parse_qs, urlparse
 
 from curl_cffi import requests
@@ -13,6 +13,28 @@ logger = logging.getLogger(__name__)
 
 OEMBED_URL = "https://www.youtube.com/oembed"
 WATCH_URL = "https://www.youtube.com/watch"
+
+
+class _OgTitleParser(HTMLParser):
+    """Extract <meta property="og:title" content="..."> — tolerant of attribute order,
+    case, and extra attributes, unlike an exact-order regex."""
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.title: str | None = None
+
+    def handle_starttag(self, tag: str, attrs: list[tuple[str, str | None]]) -> None:
+        if self.title is not None or tag != "meta":
+            return
+        attr_map = dict(attrs)
+        if attr_map.get("property") == "og:title" and attr_map.get("content") is not None:
+            self.title = attr_map["content"]
+
+
+def _extract_og_title(html_text: str) -> str | None:
+    parser = _OgTitleParser()
+    parser.feed(html_text)
+    return parser.title
 
 
 @dataclass(frozen=True, slots=True)
@@ -53,8 +75,7 @@ def _fetch_page_data(
         proxies=proxies,
     )
     response.raise_for_status()
-    title_match = re.search(r'<meta property="og:title" content="([^"]+)"', response.text)
-    title = html.unescape(title_match.group(1)) if title_match else None
+    title = _extract_og_title(response.text)
     date_match = re.search(r'"uploadDate"\s*:\s*"(\d{4}-\d{2}-\d{2})', response.text)
     upload_date = date_match.group(1) if date_match else None
     return title, upload_date

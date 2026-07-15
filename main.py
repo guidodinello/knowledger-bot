@@ -24,39 +24,49 @@ async def main_async(config: Config) -> None:
         raise ValueError("TOKEN_UPDATE_SECRET must be set when TOKEN_SERVER_PORT is configured")
 
     app = build_application(config)
-    tasks = [asyncio.create_task(_run_polling(app))]
 
-    if config.auto_transcript_project is not None:
-        from knowledger.poller import run_poller
+    try:
+        async with asyncio.TaskGroup() as tg:
+            tasks = [tg.create_task(_run_polling(app))]
 
-        tasks.append(asyncio.create_task(run_poller(app, config)))
+            if config.auto_transcript_project is not None:
+                from knowledger.poller import run_poller
 
-    if config.token_server_port is not None:
-        from knowledger.http_server import build_aiohttp_app, run_http_server
+                tasks.append(tg.create_task(run_poller(app, config)))
 
-        assert config.token_update_secret is not None  # validated above
-        aiohttp_app = build_aiohttp_app(
-            client=app.bot_data["claude_client"],
-            queue=app.bot_data["queue"],
-            telegram_app=app,
-            config=config,
-            secret=config.token_update_secret,
-            personal_org_id=config.personal_org_id,
-            cors_allowed_origin=config.cors_allowed_origin,
-        )
-        tasks.append(asyncio.create_task(run_http_server(aiohttp_app, config.token_server_port)))
+            if config.token_server_port is not None:
+                from knowledger.http_server import build_aiohttp_app, run_http_server
 
-    loop = asyncio.get_running_loop()
+                assert config.token_update_secret is not None  # validated above
+                aiohttp_app = build_aiohttp_app(
+                    client=app.bot_data["claude_client"],
+                    processor=app.bot_data["queue_processor"],
+                    telegram_app=app,
+                    config=config,
+                    secret=config.token_update_secret,
+                    personal_org_id=config.personal_org_id,
+                    cors_allowed_origin=config.cors_allowed_origin,
+                )
+                tasks.append(tg.create_task(run_http_server(aiohttp_app, config.token_server_port)))
 
-    def _shutdown():
-        logger.info("Shutdown signal received, stopping...")
-        for t in tasks:
-            t.cancel()
+            loop = asyncio.get_running_loop()
 
-    for sig in (signal.SIGTERM, signal.SIGINT):
-        loop.add_signal_handler(sig, _shutdown)
+            def _shutdown() -> None:
+                # Cancelling every sibling task here raises CancelledError inside each —
+                # TaskGroup does not treat that as a failure (it's excluded from the
+                # ExceptionGroup below), so a signal-triggered shutdown exits main_async
+                # cleanly. A genuine subsystem failure, by contrast, is a real exception
+                # that TaskGroup itself turns into cross-cancellation of the siblings and
+                # an ExceptionGroup — no manual handling needed for that case.
+                logger.info("Shutdown signal received, stopping...")
+                for t in tasks:
+                    t.cancel()
 
-    await asyncio.gather(*tasks, return_exceptions=True)
+            for sig in (signal.SIGTERM, signal.SIGINT):
+                loop.add_signal_handler(sig, _shutdown)
+    except* Exception as eg:
+        logger.error("Essential subsystem failed — shutting down", exc_info=eg)
+        raise
 
 
 def main() -> None:

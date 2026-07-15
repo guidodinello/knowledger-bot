@@ -1,6 +1,4 @@
 import json
-import os
-from functools import cached_property
 from http import HTTPStatus
 from pathlib import Path
 from typing import TypedDict
@@ -8,6 +6,7 @@ from typing import TypedDict
 from curl_cffi import requests
 
 from .logger import get_logger
+from .persistence import PersistenceIOError, atomic_write_json
 
 logger = get_logger(__name__)
 
@@ -37,6 +36,8 @@ class ClaudeClient:
     def __init__(self, session_token: str, persist_path: Path | None = None) -> None:
         self._cookie = f"sessionKey={session_token}"
         self._persist_path = persist_path
+        self._org_id_cache: str | None = None
+        self._projects_cache: list[Project] | None = None
 
     def _get_headers(self) -> dict[str, str]:
         return {
@@ -54,21 +55,25 @@ class ClaudeClient:
             "Cookie": self._cookie,
         }
 
-    @cached_property
-    def _org_id(self) -> str:
-        response = requests.get(
-            f"{BASE_URL}/organizations",
-            headers=self._get_headers(),
-            impersonate="chrome110",
-        )
-        self._check_auth(response)
-        response.raise_for_status()
+    def get_org_id(self) -> str:
+        org_id = self._org_id_cache
+        if org_id is None:
+            response = requests.get(
+                f"{BASE_URL}/organizations",
+                headers=self._get_headers(),
+                impersonate="chrome110",
+            )
+            self._check_auth(response)
+            response.raise_for_status()
 
-        for org in response.json():
-            if "chat" in org["capabilities"] or "claude_pro" in org["capabilities"]:
-                return str(org["uuid"])
-
-        raise ValueError("No organization found with 'chat' or 'claude_pro' capabilities")
+            for org in response.json():
+                if "chat" in org["capabilities"] or "claude_pro" in org["capabilities"]:
+                    org_id = str(org["uuid"])
+                    break
+            else:
+                raise ValueError("No organization found with 'chat' or 'claude_pro' capabilities")
+            self._org_id_cache = org_id
+        return org_id
 
     def _check_auth(self, response: requests.Response) -> None:
         if response.status_code in (HTTPStatus.UNAUTHORIZED, HTTPStatus.FORBIDDEN):
@@ -77,44 +82,48 @@ class ClaudeClient:
                 "Update CLAUDE_SESSION_TOKEN with a fresh sessionKey cookie from claude.ai."
             )
 
-    @cached_property
-    def projects(self) -> list[Project]:
-        response = requests.get(
-            f"{BASE_URL}/organizations/{self._org_id}/projects",
-            headers=self._get_headers(),
-            impersonate="chrome110",
-        )
-        self._check_auth(response)
-        response.raise_for_status()
-        return response.json()
+    def list_projects(self) -> list[Project]:
+        projects = self._projects_cache
+        if projects is None:
+            response = requests.get(
+                f"{BASE_URL}/organizations/{self.get_org_id()}/projects",
+                headers=self._get_headers(),
+                impersonate="chrome110",
+            )
+            self._check_auth(response)
+            response.raise_for_status()
+            projects = response.json()
+            self._projects_cache = projects
+        return projects
 
     def invalidate_projects(self) -> None:
-        self.__dict__.pop("projects", None)
+        self._projects_cache = None
 
     def update_token(self, session_token: str) -> None:
-        self._cookie = f"sessionKey={session_token}"
-        self.__dict__.pop("_org_id", None)
-        self.__dict__.pop("projects", None)
+        """Persist-before-activate: a fresh token is written to durable storage FIRST.
+        Only once that succeeds do the in-memory cookie and caches change — so a
+        persistence failure (raised to the caller) leaves the old token fully active
+        instead of running live on a token that a restart would silently revert."""
         if self._persist_path is not None:
             self._persist_token(self._persist_path, session_token)
+        self._cookie = f"sessionKey={session_token}"
+        self._org_id_cache = None
+        self._projects_cache = None
 
     @staticmethod
     def _persist_token(path: Path, session_token: str) -> None:
-        """Write-through so a fresh token survives a container restart — otherwise a
-        redeploy reboots the process with whatever's baked into CLAUDE_SESSION_TOKEN,
-        silently reverting any token updated live via update_token() since boot."""
-        tmp = path.with_suffix(".tmp")
+        """Delegates to the shared atomic-JSON writer (owner-only permissions, since this
+        is a credential) rather than reimplementing the temp-file-plus-replace pattern —
+        one place owns the durable-write mechanics. Re-raised as OSError, matching the
+        contract update_token() callers (e.g. the HTTP token endpoint) already expect."""
         try:
-            fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
-            with os.fdopen(fd, "w", encoding="utf-8") as f:
-                f.write(json.dumps({"token": session_token}))
-            os.replace(tmp, path)
-        except OSError:
-            logger.exception("Failed to persist updated token to %s", path)
+            atomic_write_json(path, {"token": session_token}, mode=0o600)
+        except PersistenceIOError as e:
+            raise OSError(str(e)) from e
 
     def list_docs(self, project_id: str) -> list[Doc]:
         response = requests.get(
-            f"{BASE_URL}/organizations/{self._org_id}/projects/{project_id}/docs",
+            f"{BASE_URL}/organizations/{self.get_org_id()}/projects/{project_id}/docs",
             headers=self._get_headers(),
             impersonate="chrome110",
         )
@@ -124,15 +133,15 @@ class ClaudeClient:
 
     def delete_doc(self, project_id: str, doc_uuid: str) -> None:
         response = requests.delete(
-            f"{BASE_URL}/organizations/{self._org_id}/projects/{project_id}/docs/{doc_uuid}",
+            f"{BASE_URL}/organizations/{self.get_org_id()}/projects/{project_id}/docs/{doc_uuid}",
             headers=self._get_headers(),
             impersonate="chrome110",
         )
         self._check_auth(response)
         response.raise_for_status()
 
-    def upload_content(self, project_id: str, content: str, file_name: str) -> dict:
-        url = f"{BASE_URL}/organizations/{self._org_id}/projects/{project_id}/docs"
+    def upload_content(self, project_id: str, content: str, file_name: str) -> None:
+        url = f"{BASE_URL}/organizations/{self.get_org_id()}/projects/{project_id}/docs"
         payload = {"file_name": file_name, "content": content}
 
         response = requests.post(
@@ -147,9 +156,7 @@ class ClaudeClient:
             logger.error("Upload failed: %d %s", response.status_code, response.text)
             response.raise_for_status()
 
-        return response.json()
-
 
 def get_org_id_for_token(token: str) -> str:
     """Return the org UUID for a session token. Raises AuthError if the token is invalid."""
-    return ClaudeClient(token)._org_id
+    return ClaudeClient(token).get_org_id()
