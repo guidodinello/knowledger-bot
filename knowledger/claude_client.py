@@ -1,6 +1,8 @@
 import json
+import os
 from functools import cached_property
 from http import HTTPStatus
+from pathlib import Path
 from typing import TypedDict
 
 from curl_cffi import requests
@@ -32,8 +34,9 @@ class AuthError(Exception):
 
 
 class ClaudeClient:
-    def __init__(self, session_token: str) -> None:
+    def __init__(self, session_token: str, persist_path: Path | None = None) -> None:
         self._cookie = f"sessionKey={session_token}"
+        self._persist_path = persist_path
 
     def _get_headers(self) -> dict[str, str]:
         return {
@@ -92,6 +95,22 @@ class ClaudeClient:
         self._cookie = f"sessionKey={session_token}"
         self.__dict__.pop("_org_id", None)
         self.__dict__.pop("projects", None)
+        if self._persist_path is not None:
+            self._persist_token(self._persist_path, session_token)
+
+    @staticmethod
+    def _persist_token(path: Path, session_token: str) -> None:
+        """Write-through so a fresh token survives a container restart — otherwise a
+        redeploy reboots the process with whatever's baked into CLAUDE_SESSION_TOKEN,
+        silently reverting any token updated live via update_token() since boot."""
+        tmp = path.with_suffix(".tmp")
+        try:
+            fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+            with os.fdopen(fd, "w", encoding="utf-8") as f:
+                f.write(json.dumps({"token": session_token}))
+            os.replace(tmp, path)
+        except OSError:
+            logger.exception("Failed to persist updated token to %s", path)
 
     def list_docs(self, project_id: str) -> list[Doc]:
         response = requests.get(

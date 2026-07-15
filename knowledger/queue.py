@@ -17,6 +17,8 @@ class QueueEntry:
     chat_id: int
     video_title: str
     queued_at: str  # ISO-8601, for display only
+    upload_attempts: int = 0  # consecutive non-auth retry failures, for the stuck-entry alert
+    overwrite_doc_uuid: str | None = None  # set for an overwrite retry: delete this doc first
 
 
 @dataclass(slots=True)
@@ -31,12 +33,9 @@ class Queue:
         self._save(entries + [entry])
         return True
 
-    def drain(self) -> list[QueueEntry]:
-        """Read and clear all queued entries. Missing or corrupt file is treated as empty."""
-        entries = self._load()
-        if entries:
-            self._save([])
-        return entries
+    def peek(self) -> list[QueueEntry]:
+        """Read all queued entries without clearing them. Missing/corrupt file is empty."""
+        return self._load()
 
     def remove(self, project_id: str, video_id: str) -> None:
         """Drop any entry for this project/video pair. No-op if none is queued."""

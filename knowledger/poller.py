@@ -23,6 +23,7 @@ from telegram.ext import Application
 from .claude_client import AuthError, ClaudeClient
 from .config import Config, ProxyConfig
 from .logger import get_logger
+from .notify import notify
 from .queue import Queue, QueueEntry
 from .transcript import fetch_transcript
 from .youtube import build_doc_name
@@ -227,14 +228,6 @@ def _resolve_project(client: ClaudeClient, name_or_uuid: str) -> str | None:
     return match["uuid"]
 
 
-async def _notify(app: Application, config: Config, text: str) -> None:
-    for uid in config.allowed_user_ids:
-        try:
-            await app.bot.send_message(chat_id=uid, text=text)
-        except Exception:
-            logger.warning("Failed to notify user %d", uid, exc_info=True)
-
-
 def _enqueue_auth_fallback(
     queue: Queue,
     project_id: str,
@@ -277,7 +270,7 @@ async def _process_video(
         first_seen = datetime.fromisoformat(video.first_seen)
         if now - first_seen >= GIVE_UP_AFTER:
             logger.info("Giving up on %s — no captions after %s", video.video_id, GIVE_UP_AFTER)
-            await _notify(app, config, f"⚠️ No captions for “{video.title}” — gave up.")
+            await notify(app, config, f"⚠️ No captions for “{video.title}” — gave up.")
             return None
         logger.info("Transcript not ready for %s; will retry", video.video_id)
         return video
@@ -288,7 +281,7 @@ async def _process_video(
         docs = await asyncio.to_thread(client.list_docs, project_id)
     except AuthError:
         _enqueue_auth_fallback(queue, project_id, video, transcript, file_name, config)
-        await _notify(app, config, f"Token expired — “{file_name}” queued. Run /refresh.")
+        await notify(app, config, f"Token expired — “{file_name}” queued. Run /refresh.")
         return video  # keep pending until we confirm the upload landed
 
     if any(d["file_name"] == file_name for d in docs):
@@ -300,13 +293,13 @@ async def _process_video(
         await asyncio.to_thread(client.upload_content, project_id, transcript, file_name)
     except AuthError:
         _enqueue_auth_fallback(queue, project_id, video, transcript, file_name, config)
-        await _notify(app, config, f"Token expired — “{file_name}” queued. Run /refresh.")
+        await notify(app, config, f"Token expired — “{file_name}” queued. Run /refresh.")
         return video
     except Exception:
         logger.exception("Upload failed for %s; will retry", file_name)
         attempts = video.upload_attempts + 1
         if attempts % MAX_UPLOAD_ATTEMPTS == 0:
-            await _notify(
+            await notify(
                 app,
                 config,
                 f"🛑 Upload stuck for “{file_name}” — failed {attempts}x in a row. "
@@ -316,7 +309,7 @@ async def _process_video(
 
     logger.info("Auto-uploaded %s to project %s", file_name, project_id)
     queue.remove(project_id, video.video_id)
-    await _notify(app, config, f"✅ Auto-uploaded “{file_name}”")
+    await notify(app, config, f"✅ Auto-uploaded “{file_name}”")
     return None
 
 
@@ -355,7 +348,7 @@ async def _tick(
         logger.warning("Auth error resolving project; skipping processing this tick")
         if not state.auth_error_notified:
             state.auth_error_notified = True
-            await _notify(
+            await notify(
                 app,
                 config,
                 "⚠️ Claude session token expired — poller is paused. "
@@ -364,7 +357,7 @@ async def _tick(
         return
     if state.auth_error_notified:
         state.auth_error_notified = False
-        await _notify(app, config, "✅ Claude session token restored — poller resumed.")
+        await notify(app, config, "✅ Claude session token restored — poller resumed.")
     if project_id is None:
         return
 

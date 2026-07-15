@@ -37,6 +37,9 @@ async def main_async(config: Config) -> None:
         assert config.token_update_secret is not None  # validated above
         aiohttp_app = build_aiohttp_app(
             client=app.bot_data["claude_client"],
+            queue=app.bot_data["queue"],
+            telegram_app=app,
+            config=config,
             secret=config.token_update_secret,
             personal_org_id=config.personal_org_id,
             cors_allowed_origin=config.cors_allowed_origin,

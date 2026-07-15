@@ -3,11 +3,31 @@ import hmac
 
 from aiohttp import web
 from aiohttp.web_middlewares import middleware
+from telegram.ext import Application
 
+from .bot import drain_queue
 from .claude_client import AuthError, ClaudeClient, get_org_id_for_token
+from .config import Config
 from .logger import get_logger
+from .queue import Queue
 
 logger = get_logger(__name__)
+
+
+def _run_in_background(app: web.Application, coro) -> None:
+    """Fire-and-forget, but owned by the app: kept alive against GC while running, and
+    awaited on shutdown so cleanup mid-drain doesn't just abandon it. drain_queue() itself
+    is safe to cancel — it removes each queue entry right before processing it, so at most
+    the single entry in flight is at risk, not the whole batch."""
+    task = asyncio.create_task(coro)
+    app["background_tasks"].add(task)
+    task.add_done_callback(app["background_tasks"].discard)
+
+
+async def _await_background_tasks(app: web.Application) -> None:
+    tasks = app["background_tasks"]
+    if tasks:
+        await asyncio.gather(*tasks, return_exceptions=True)
 
 
 async def _handle_update_token(request: web.Request) -> web.Response:
@@ -46,6 +66,12 @@ async def _handle_update_token(request: web.Request) -> web.Response:
 
     client.update_token(new_token)
     logger.info("Token updated via HTTP endpoint")
+
+    telegram_app: Application = request.app["telegram_app"]
+    config: Config = request.app["config"]
+    queue: Queue = request.app["queue"]
+    _run_in_background(request.app, drain_queue(telegram_app, config, client, queue))
+
     return web.json_response({"status": "ok"})
 
 
@@ -69,14 +95,22 @@ def _make_cors_middleware(allowed_origin: str):
 
 def build_aiohttp_app(
     client: ClaudeClient,
+    queue: Queue,
+    telegram_app: Application,
+    config: Config,
     secret: str,
     personal_org_id: str | None,
     cors_allowed_origin: str = "*",
 ) -> web.Application:
     app = web.Application(middlewares=[_make_cors_middleware(cors_allowed_origin)])
     app["claude_client"] = client
+    app["queue"] = queue
+    app["telegram_app"] = telegram_app
+    app["config"] = config
     app["token_update_secret"] = secret
     app["personal_org_id"] = personal_org_id
+    app["background_tasks"] = set()
+    app.on_cleanup.append(_await_background_tasks)
     app.router.add_post("/update-token", _handle_update_token)
     app.router.add_route("OPTIONS", "/update-token", _handle_update_token)
     return app
@@ -90,4 +124,4 @@ async def run_http_server(aiohttp_app: web.Application, port: int) -> None:
     try:
         await asyncio.Event().wait()
     finally:
-        await runner.cleanup()
+        await runner.cleanup()  # runs app.on_cleanup, including _await_background_tasks
