@@ -11,7 +11,7 @@ import asyncio
 import json
 import os
 import re
-from dataclasses import asdict, dataclass, field
+from dataclasses import asdict, dataclass, field, replace
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
@@ -35,6 +35,7 @@ YT_NS = "{http://www.youtube.com/xml/schemas/2015}"
 
 UPLOAD_DELAY = timedelta(hours=24)  # wait for YouTube's polished captions to replace the draft
 GIVE_UP_AFTER = timedelta(hours=72)  # measured from first detection, not publish time
+MAX_UPLOAD_ATTEMPTS = 5  # non-auth upload failures before alerting; also the re-alert cooldown
 # Priority order: a channel page carries its OWN id as "externalId" / the canonical
 # /channel/ link, but also embeds OTHER channels' "channelId" (recommendations, etc.) —
 # so match the authoritative fields first and fall back to a bare channelId only last.
@@ -60,6 +61,7 @@ class PendingVideo:
     channel_name: str
     published: str  # ISO-8601, tz-aware (from the feed)
     first_seen: str  # ISO-8601 UTC, when the poller first enqueued it
+    upload_attempts: int = 0  # consecutive non-auth upload failures, for the stuck-video alert
 
 
 @dataclass(slots=True)
@@ -67,6 +69,7 @@ class PollerState:
     path: Path
     seen: set[str] = field(default_factory=set)
     pending: list[PendingVideo] = field(default_factory=list)
+    auth_error_notified: bool = False  # in-memory only; not persisted to disk
 
     @classmethod
     def load(cls, path: Path) -> "PollerState":
@@ -264,8 +267,9 @@ async def _process_video(
     project_id: str,
     video: PendingVideo,
     now: datetime,
-) -> bool:
-    """Fetch + upload one due video. Returns True if it should leave the pending list."""
+) -> PendingVideo | None:
+    """Fetch + upload one due video. Returns the (possibly updated) video to keep it in the
+    pending list, or None once it's done — confirmed uploaded, or permanently given up on."""
     transcript = await asyncio.to_thread(
         fetch_transcript, video.video_id, config.proxy, config.youtube_cookies_path
     )
@@ -274,9 +278,9 @@ async def _process_video(
         if now - first_seen >= GIVE_UP_AFTER:
             logger.info("Giving up on %s — no captions after %s", video.video_id, GIVE_UP_AFTER)
             await _notify(app, config, f"⚠️ No captions for “{video.title}” — gave up.")
-            return True
+            return None
         logger.info("Transcript not ready for %s; will retry", video.video_id)
-        return False
+        return video
 
     file_name = build_doc_name(video.channel_name, video.title, video.published[:10])
 
@@ -285,25 +289,35 @@ async def _process_video(
     except AuthError:
         _enqueue_auth_fallback(queue, project_id, video, transcript, file_name, config)
         await _notify(app, config, f"Token expired — “{file_name}” queued. Run /refresh.")
-        return False  # keep pending until we confirm the upload landed
+        return video  # keep pending until we confirm the upload landed
 
     if any(d["file_name"] == file_name for d in docs):
         logger.info("Doc already exists, skipping: %s", file_name)
-        return True
+        queue.remove(project_id, video.video_id)
+        return None
 
     try:
         await asyncio.to_thread(client.upload_content, project_id, transcript, file_name)
     except AuthError:
         _enqueue_auth_fallback(queue, project_id, video, transcript, file_name, config)
         await _notify(app, config, f"Token expired — “{file_name}” queued. Run /refresh.")
-        return False
+        return video
     except Exception:
         logger.exception("Upload failed for %s; will retry", file_name)
-        return False
+        attempts = video.upload_attempts + 1
+        if attempts % MAX_UPLOAD_ATTEMPTS == 0:
+            await _notify(
+                app,
+                config,
+                f"🛑 Upload stuck for “{file_name}” — failed {attempts}x in a row. "
+                "Check logs; it will keep retrying.",
+            )
+        return replace(video, upload_attempts=attempts)
 
     logger.info("Auto-uploaded %s to project %s", file_name, project_id)
+    queue.remove(project_id, video.video_id)
     await _notify(app, config, f"✅ Auto-uploaded “{file_name}”")
-    return True
+    return None
 
 
 async def _tick(
@@ -339,21 +353,38 @@ async def _tick(
         project_id = await asyncio.to_thread(_resolve_project, client, project_name)
     except AuthError:
         logger.warning("Auth error resolving project; skipping processing this tick")
+        if not state.auth_error_notified:
+            state.auth_error_notified = True
+            await _notify(
+                app,
+                config,
+                "⚠️ Claude session token expired — poller is paused. "
+                "Update the token (POST /update-token) to resume.",
+            )
         return
+    if state.auth_error_notified:
+        state.auth_error_notified = False
+        await _notify(app, config, "✅ Claude session token restored — poller resumed.")
     if project_id is None:
         return
 
     # 3. Process every pending video whose publish time is at least UPLOAD_DELAY ago.
+    # Persist after each video so a crash/exception mid-batch can't discard already-confirmed
+    # progress on videos processed earlier in the same tick (state.pending is always the
+    # already-settled prefix plus the untouched remainder, never in-memory-only).
     now = datetime.now(UTC)
-    still_pending: list[PendingVideo] = []
-    for video in state.pending:
+    original_pending = list(state.pending)
+    settled: list[PendingVideo] = []
+    for i, video in enumerate(original_pending):
         if now - datetime.fromisoformat(video.published) < UPLOAD_DELAY:
-            still_pending.append(video)
+            settled.append(video)
             continue
-        done = await _process_video(app, config, client, queue, project_id, video, now)
-        if not done:
-            still_pending.append(video)
-    state.pending = still_pending
+        result = await _process_video(app, config, client, queue, project_id, video, now)
+        if result is not None:
+            settled.append(result)
+        state.pending = settled + original_pending[i + 1 :]
+        state.save()
+    state.pending = settled
     state.save()
 
 

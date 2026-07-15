@@ -16,6 +16,7 @@ usage() {
     echo "  update  — git pull on server, rebuild image, recreate container"
     echo "  logs    — tail container logs"
     echo "  restart — restart container"
+    echo "  inspect — print the retry queue and channel/video poller state"
 }
 
 sync_env() {
@@ -24,6 +25,23 @@ sync_env() {
 
 sync_cookies() {
     rsync -e "ssh -i $SSH_KEY" cookies.txt "$HOST:$REMOTE_DIR/cookies.txt"
+}
+
+_print_remote_json() {
+    local label="$1" remote_path="$2" content
+    echo "--- $label ---"
+    content="$($SSH "cat $remote_path 2>/dev/null" || true)"
+    if [[ -z "$content" ]]; then
+        echo "(empty — no file)"
+    else
+        echo "$content" | python3 -m json.tool
+    fi
+}
+
+inspect() {
+    _print_remote_json "petition_queue.json (retry/upload queue)" "$REMOTE_DIR/data/petition_queue.json"
+    echo
+    _print_remote_json "poller_state.json (seen + pending videos)" "$REMOTE_DIR/data/poller_state.json"
 }
 
 recreate() {
@@ -62,6 +80,9 @@ case "${1:-}" in
         $SSH "docker rm -f knowledger"
         recreate
         $SSH "docker logs --tail 20 knowledger"
+        ;;
+    inspect)
+        inspect
         ;;
     *)
         usage
