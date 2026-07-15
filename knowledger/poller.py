@@ -359,7 +359,7 @@ async def _tick(
                 app,
                 config,
                 "⚠️ Claude session token expired — poller is paused. "
-                "Update the token (e.g. via /update-token) to resume.",
+                "Update the token (POST /update-token) to resume.",
             )
         return
     if state.auth_error_notified:
