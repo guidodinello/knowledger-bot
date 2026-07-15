@@ -33,12 +33,9 @@ class Queue:
         self._save(entries + [entry])
         return True
 
-    def drain(self) -> list[QueueEntry]:
-        """Read and clear all queued entries. Missing or corrupt file is treated as empty."""
-        entries = self._load()
-        if entries:
-            self._save([])
-        return entries
+    def peek(self) -> list[QueueEntry]:
+        """Read all queued entries without clearing them. Missing/corrupt file is empty."""
+        return self._load()
 
     def remove(self, project_id: str, video_id: str) -> None:
         """Drop any entry for this project/video pair. No-op if none is queued."""

@@ -141,6 +141,15 @@ class DrainResult:
     failed_other: int = 0
 
 
+def _requeue(queue: Queue, entry: QueueEntry) -> None:
+    """Persist entry back to the queue. A storage failure here loses just this one entry
+    (logged loudly) instead of — via an unguarded exception — the rest of the batch too."""
+    try:
+        queue.enqueue(entry)
+    except Exception:
+        logger.exception("Failed to persist requeue for %s — entry may be lost", entry.file_name)
+
+
 async def _upload_and_track(
     telegram_app: Application,
     config: Config,
@@ -151,20 +160,22 @@ async def _upload_and_track(
 ) -> None:
     """Attempt entry's upload. On success, notify the original chat and drop it from the
     queue. On an auth error, requeue silently — this is the expected case until the token
-    is fixed. On anything else, requeue with an incremented attempt count and alert every
-    MAX_UPLOAD_ATTEMPTS attempts, so a genuinely broken entry doesn't fail invisibly forever."""
+    is fixed. On any other request failure, requeue with an incremented attempt count and
+    alert every MAX_UPLOAD_ATTEMPTS attempts, so a genuinely broken entry doesn't fail
+    invisibly forever. Anything outside RequestException is a programming error, not a
+    transient failure — let it propagate instead of retrying it forever."""
     try:
         await asyncio.to_thread(
             client.upload_content, entry.project_id, entry.transcript, entry.file_name
         )
     except AuthError:
-        queue.enqueue(entry)
+        _requeue(queue, entry)
         result.failed_auth += 1
         return
-    except Exception:
+    except RequestException:
         logger.exception("Queue retry failed for %s", entry.file_name)
         attempts = entry.upload_attempts + 1
-        queue.enqueue(replace(entry, upload_attempts=attempts))
+        _requeue(queue, replace(entry, upload_attempts=attempts))
         if attempts % MAX_UPLOAD_ATTEMPTS == 0:
             await notify(
                 telegram_app,
@@ -186,26 +197,53 @@ async def drain_queue(
     telegram_app: Application, config: Config, client: ClaudeClient, queue: Queue
 ) -> DrainResult:
     """Attempt every queued entry once — auth-fallback uploads and overwrites alike. Called
-    both from /refresh (manual) and automatically the moment the Claude token is updated."""
-    entries = queue.drain()
+    both from /refresh (manual) and automatically the moment the Claude token is updated.
+
+    Each entry is removed from the queue right before it's processed, rather than bulk-
+    draining the whole file up front: if the process is killed mid-run, only the one entry
+    in flight is at risk — everything else is untouched on disk, ready for the next drain."""
+    entries = queue.peek()
     result = DrainResult()
     if not entries:
         return result
 
     docs_by_project: dict[str, list[Doc]] = {}
     for entry in entries:
+        try:
+            queue.remove(entry.project_id, entry.video_id)
+        except Exception:
+            logger.exception(
+                "Failed to remove queued entry %s before retrying; skipping this round",
+                entry.file_name,
+            )
+            result.failed_other += 1
+            continue
+
         if entry.project_id not in docs_by_project:
             try:
                 docs_by_project[entry.project_id] = await asyncio.to_thread(
                     client.list_docs, entry.project_id
                 )
             except AuthError:
-                queue.enqueue(entry)
+                _requeue(queue, entry)
                 result.failed_auth += 1
                 continue
-            except Exception:
+            except RequestException:
+                # Unknown state for this project — don't guess; requeue rather than risk
+                # treating "listing failed" as "the doc doesn't exist" for every entry
+                # sharing this project_id.
                 logger.exception("Failed to list docs for project %s", entry.project_id)
-                docs_by_project[entry.project_id] = []
+                attempts = entry.upload_attempts + 1
+                _requeue(queue, replace(entry, upload_attempts=attempts))
+                if attempts % MAX_UPLOAD_ATTEMPTS == 0:
+                    await notify(
+                        telegram_app,
+                        config,
+                        f"🛑 Queued upload stuck for “{entry.file_name}” — failed "
+                        f"{attempts}x in a row listing project docs. Check logs.",
+                    )
+                result.failed_other += 1
+                continue
         docs = docs_by_project[entry.project_id]
 
         if entry.overwrite_doc_uuid is not None:
@@ -217,13 +255,13 @@ async def drain_queue(
                         client.delete_doc, entry.project_id, entry.overwrite_doc_uuid
                     )
                 except AuthError:
-                    queue.enqueue(entry)
+                    _requeue(queue, entry)
                     result.failed_auth += 1
                     continue
-                except Exception:
+                except RequestException:
                     logger.exception("Queued delete failed for %s", entry.file_name)
                     attempts = entry.upload_attempts + 1
-                    queue.enqueue(replace(entry, upload_attempts=attempts))
+                    _requeue(queue, replace(entry, upload_attempts=attempts))
                     if attempts % MAX_UPLOAD_ATTEMPTS == 0:
                         await notify(
                             telegram_app,
@@ -233,6 +271,13 @@ async def drain_queue(
                         )
                     result.failed_other += 1
                     continue
+            elif any(d["file_name"] == entry.file_name for d in docs):
+                # Old doc already gone AND a doc with this name already exists: the
+                # replacement landed on a prior attempt whose confirmation we never saw
+                # (e.g. the response was lost). Uploading again would create a duplicate.
+                logger.info("Overwrite already landed, skipping: %s", entry.file_name)
+                result.already_existed += 1
+                continue
             await _upload_and_track(telegram_app, config, client, queue, entry, result)
             continue
 
