@@ -41,6 +41,12 @@ async def _await_background_tasks(app: web.Application) -> None:
 
 
 async def _handle_update_token(request: web.Request) -> web.Response:
+    """Consumed by the browser extension at
+    https://github.com/guidodinello/knowledger-token-updater, which POSTs
+    {"secret": ..., "token": ...} whenever it observes a fresh claude.ai session token.
+    The request/response shape and status codes here are a cross-repo contract — see
+    tests/test_http_server_contract.py, which pins them so a drift here is caught in CI
+    rather than surfacing as a silent failure in the extension."""
     settings: TokenServerSettings = request.app["settings"]
     client: ClaudeClient = request.app["claude_client"]
 
