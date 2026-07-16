@@ -111,13 +111,6 @@ class QueueProcessor:
             docs=docs_by_project[entry.project_id],
         )
 
-        if entry.overwrite_doc_uuid is not None:
-            # A successful delete (or upload attempt following one) invalidates the
-            # per-project cache for the rest of this drain — simpler than surgically
-            # patching it, at the cost of one possible extra list_docs call for a
-            # later entry sharing this project.
-            docs_by_project.pop(entry.project_id, None)
-
         match outcome:
             case Uploaded():
                 self._queue.ack(entry.id)
@@ -133,14 +126,16 @@ class QueueProcessor:
             case DeferredForAuth():
                 self._queue.release(entry.id)
                 result.failed_auth += 1
-            case RetryPending(error):
-                logger.warning("Queue retry failed for %s: %s", entry.file_name, error)
+            case RetryPending(step=step, error=error):
+                logger.warning(
+                    "Queue retry failed for %s while %s: %s", entry.file_name, step, error
+                )
                 await self._release_with_alert(
                     telegram_app,
                     config,
                     entry,
                     result,
-                    f"🛑 Queued upload stuck for “{entry.file_name}” — failed "
+                    f"🛑 Queued upload stuck for “{entry.file_name}” while {step} — failed "
                     "{attempts}x in a row. Check logs; it will keep retrying.",
                 )
 

@@ -336,19 +336,21 @@ class TranscriptPoller:
                     self._app, self._config, f"Token expired — “{file_name}” queued. Run /refresh."
                 )
                 return video  # keep pending until we confirm the upload landed
-            case RetryPending(error):
+            case RetryPending(step=step, error=error):
                 # Covers both a failed doc listing and a failed upload — previously
                 # only upload failures counted toward the stuck-video alert; a
                 # transient listing failure silently retried unnoticed. Folding both
                 # into the same retry-classification closes that gap.
-                logger.warning("Upload attempt failed for %s: %s; will retry", file_name, error)
+                logger.warning(
+                    "Upload attempt failed for %s while %s: %s; will retry", file_name, step, error
+                )
                 attempts = video.upload_attempts + 1
                 if attempts % MAX_UPLOAD_ATTEMPTS == 0:
                     await notify(
                         self._app,
                         self._config,
-                        f"🛑 Upload stuck for “{file_name}” — failed {attempts}x in a row. "
-                        "Check logs; it will keep retrying.",
+                        f"🛑 Upload stuck for “{file_name}” while {step} — failed {attempts}x in "
+                        "a row. Check logs; it will keep retrying.",
                     )
                 return replace(video, upload_attempts=attempts)
 

@@ -375,9 +375,9 @@ async def handle_project_selection(update: Update, context: CustomContext, user:
             else:
                 msg = f"Token expired — *{escaped}* was already queued."
             await query.edit_message_text(msg, parse_mode="Markdown")
-        case RetryPending(error):
-            logger.warning("Upload failed for %s: %s", file_name, error)
-            await query.edit_message_text(f"Upload failed: {error}")
+        case RetryPending(step=step, error=error):
+            logger.warning("Upload failed for %s while %s: %s", file_name, step, error)
+            await query.edit_message_text(f"Upload failed while {step}: {error}")
 
 
 @_require_auth
@@ -508,13 +508,16 @@ async def handle_duplicate_choice(update: Update, context: CustomContext, user: 
                 await query.edit_message_text(
                     f"*{escaped}* was already overwritten.", parse_mode="Markdown"
                 )
-            case DeferredForAuth(error):
+            case DeferredForAuth(step=step, error=error):
                 queue.release(claimed.id)
-                await query.edit_message_text(f"Auth error — overwrite queued for retry: {error}")
-            case RetryPending(error):
+                await query.edit_message_text(
+                    f"Auth error while {step} — overwrite queued for retry: {error}"
+                )
+            case RetryPending(step=step, error=error):
                 queue.release(claimed.id, increment_attempts=True)
                 await query.edit_message_text(
-                    f"Overwrite failed: {error}. It has been queued and will retry automatically."
+                    f"Overwrite failed while {step}: {error}. It has been queued and will "
+                    "retry automatically."
                 )
     except Exception:
         # Anything unexpected (a programming error, a malformed API response) must

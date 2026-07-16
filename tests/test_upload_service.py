@@ -163,3 +163,21 @@ def test_pre_fetched_docs_skip_internal_list_call() -> None:
     outcome = service.upload("proj", "transcript", "f.md", docs=[])
 
     assert outcome == Uploaded()
+
+
+def test_successful_overwrite_delete_invalidates_caller_supplied_docs_cache() -> None:
+    """A caller reusing its own cached `docs` list across multiple upload() calls for
+    the same project (the queue processor's docs_by_project) must see the deleted
+    entry drop out automatically — the service mutates the list it was given in place
+    rather than pushing cache-invalidation responsibility onto every caller."""
+    client = FakeClient()
+    client.docs = [{"uuid": "old", "file_name": "f.md"}]
+    cached_docs = client.docs
+    service = TranscriptUploadService(client)
+
+    outcome = service.upload(
+        "proj", "new-transcript", "f.md", overwrite_doc_uuid="old", docs=cached_docs
+    )
+
+    assert outcome == Uploaded()
+    assert cached_docs == []

@@ -128,11 +128,11 @@ def main() -> None:
         case AlreadyExists():
             print(f"'{file_name}' already exists in this project — nothing uploaded.")
             sys.exit(1)
-        case DeferredForAuth(error):
-            print(f"Auth error: {error}", file=sys.stderr)
+        case DeferredForAuth(step=step, error=error):
+            print(f"Auth error while {step}: {error}", file=sys.stderr)
             sys.exit(1)
-        case RetryPending(error):
-            print(f"Upload failed: {error}", file=sys.stderr)
+        case RetryPending(step=step, error=error):
+            print(f"Upload failed while {step}: {error}", file=sys.stderr)
             sys.exit(1)
 
 
