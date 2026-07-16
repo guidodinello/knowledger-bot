@@ -47,6 +47,7 @@ Send the bot a YouTube URL. It will show your Claude projects as buttons — tap
 |---|---|
 | `/start` | Welcome message |
 | `/help` | Show help |
+| `/inqueue` | Show queued/pending uploads |
 | `/refresh` | Reload Claude project list |
 
 ## Token management

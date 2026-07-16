@@ -21,6 +21,7 @@ from .claude_client import AuthError, ClaudeClient, Doc, Project
 from .config import Config
 from .logger import get_logger
 from .persistence import PersistenceError
+from .poller import PollerState
 from .queue import Queue, QueueEntry
 from .queue_processor import DrainResult, QueueProcessor
 from .transcript import TranscriptTransportError, TranscriptUnavailable, fetch_transcript
@@ -121,7 +122,9 @@ async def cmd_start(update: Update, context: CustomContext, user: User) -> None:
         return
     await update.message.reply_text(
         "Send me a YouTube URL and I'll let you pick a Claude project to save the "
-        "transcript to.\n\nCommands: /refresh — reload project list, /help — show this message",
+        "transcript to.\n\n"
+        "Commands: /inqueue — show queue contents, /refresh — reload project list, "
+        "/help — show this message",
     )
 
 
@@ -183,6 +186,49 @@ async def drain_queue(
     supplied (e.g. direct/manual calls in tests)."""
     proc = processor if processor is not None else QueueProcessor(queue)
     return await proc.drain(telegram_app, config, client)
+
+
+@_require_auth
+async def cmd_inqueue(update: Update, context: CustomContext, user: User) -> None:
+    if update.message is None:
+        return
+
+    lines: list[str] = []
+
+    queue: Queue = context.bot_data["queue"]
+    entries = queue.peek()
+    lines.append("petition_queue.json (retry/upload queue)")
+    if entries:
+        for e in entries:
+            status = "pending" if e.state == "pending" else "in_flight"
+            title = escape_markdown(e.video_title or e.file_name, version=1)
+            attempts = f" — attempts: {e.upload_attempts}" if e.upload_attempts else ""
+            lines.append(f"• [{status}] {title}{attempts}")
+    else:
+        lines.append("(empty)")
+
+    lines.append("")
+
+    state_path = context.bot_data["config"].storage.data_dir / "poller_state.json"
+    lines.append("poller_state.json (seen + pending videos)")
+    try:
+        state = PollerState.load(state_path)
+    except Exception as e:
+        logger.exception("Failed to read poller state")
+        lines.append(f"(error: {e})")
+    else:
+        if state.pending:
+            lines.append(f"pending: {len(state.pending)}")
+            for v in state.pending:
+                title = escape_markdown(v.title, version=1)
+                attempts = f" — attempts: {v.upload_attempts}" if v.upload_attempts else ""
+                lines.append(f"• {title} — {v.channel_name}{attempts}")
+        else:
+            lines.append("(no pending videos)")
+        if state.seen:
+            lines.append(f"seen: {len(state.seen)} videos total")
+
+    await update.message.reply_text("\n".join(lines), parse_mode="Markdown")
 
 
 @_require_auth
@@ -576,6 +622,7 @@ def build_application(config: Config) -> Application:
 
     app.add_handler(CommandHandler("start", cmd_start))
     app.add_handler(CommandHandler("help", cmd_help))
+    app.add_handler(CommandHandler("inqueue", cmd_inqueue))
     app.add_handler(CommandHandler("refresh", cmd_refresh))
     app.add_handler(
         MessageHandler(filters.TEXT & filters.Regex(YOUTUBE_URL_PATTERN), handle_youtube_url),
