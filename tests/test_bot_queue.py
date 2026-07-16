@@ -6,7 +6,7 @@ from curl_cffi.requests.exceptions import RequestException
 
 from knowledger.bot import drain_queue
 from knowledger.claude_client import AuthError
-from knowledger.config import Config, LoggerConfig
+from knowledger.config import ClaudeSettings, Config, LoggerConfig, TelegramSettings
 from knowledger.queue import Queue, QueueEntry
 from knowledger.queue_processor import MAX_UPLOAD_ATTEMPTS, QueueProcessor
 
@@ -58,9 +58,8 @@ class FakeClaudeClient:
 def _config() -> Config:
     return Config(
         logger=LoggerConfig(),
-        telegram_bot_token="x",
-        claude_session_token="x",
-        allowed_user_ids=frozenset({1}),
+        telegram=TelegramSettings(bot_token="x", allowed_user_ids=frozenset({1})),
+        claude=ClaudeSettings(session_token="x"),
     )
 
 

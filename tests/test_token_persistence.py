@@ -109,7 +109,7 @@ def test_load_config_falls_back_to_env_var_when_no_persisted_token(
 
     config = load_config()
 
-    assert config.claude_session_token == "stale-env-token"
+    assert config.claude.session_token == "stale-env-token"
 
 
 def test_load_config_prefers_persisted_token_over_stale_env_var(
@@ -124,7 +124,7 @@ def test_load_config_prefers_persisted_token_over_stale_env_var(
 
     config = load_config()
 
-    assert config.claude_session_token == "fresh-token-123"
+    assert config.claude.session_token == "fresh-token-123"
 
 
 def test_load_config_fails_closed_on_corrupt_persisted_token(

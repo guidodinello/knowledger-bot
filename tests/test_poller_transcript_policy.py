@@ -4,8 +4,8 @@ from unittest.mock import AsyncMock, patch
 
 import pytest
 
-from knowledger.config import Config, LoggerConfig
-from knowledger.poller import GIVE_UP_AFTER, PendingVideo, _process_video
+from knowledger.config import ClaudeSettings, Config, LoggerConfig, TelegramSettings
+from knowledger.poller import GIVE_UP_AFTER, PendingVideo, PollerState, TranscriptPoller
 from knowledger.queue import Queue
 from knowledger.transcript import TranscriptTransportError, TranscriptUnavailable
 
@@ -13,9 +13,8 @@ from knowledger.transcript import TranscriptTransportError, TranscriptUnavailabl
 def _config() -> Config:
     return Config(
         logger=LoggerConfig(),
-        telegram_bot_token="x",
-        claude_session_token="x",
-        allowed_user_ids=frozenset({1}),
+        telegram=TelegramSettings(bot_token="x", allowed_user_ids=frozenset({1})),
+        claude=ClaudeSettings(session_token="x"),
     )
 
 
@@ -30,6 +29,18 @@ def _video(first_seen: datetime) -> PendingVideo:
     )
 
 
+def _poller(tmp_path, client=None, queue=None) -> TranscriptPoller:
+    return TranscriptPoller(
+        app=object(),  # not touched by _process_video's own logic; used only via notify()
+        config=_config(),
+        client=client if client is not None else object(),
+        queue=queue if queue is not None else Queue(path=tmp_path / "q.json"),
+        channels=[],
+        state=PollerState(path=tmp_path / "state.json"),
+        project_name="proj",
+    )
+
+
 @pytest.fixture(autouse=True)
 def _no_notify():
     with patch("knowledger.poller.notify", new=AsyncMock()):
@@ -41,14 +52,10 @@ def test_transport_error_never_ages_into_give_up_even_past_the_window(tmp_path) 
     it must never be reclassified as 'no captions' just because time has passed."""
     old_enough = datetime.now(UTC) - GIVE_UP_AFTER - timedelta(hours=1)
     video = _video(old_enough)
-    queue = Queue(path=tmp_path / "q.json")
-    client = object()  # unused: fetch fails before any client call
-    app = object()
+    poller = _poller(tmp_path)  # client unused: fetch fails before any client call
 
     with patch("knowledger.poller.fetch_transcript", side_effect=TranscriptTransportError("v")):
-        result = asyncio.run(
-            _process_video(app, _config(), client, queue, "proj", video, datetime.now(UTC))
-        )
+        result = asyncio.run(poller._process_video("proj", video, datetime.now(UTC)))
 
     assert result is not None  # kept pending, not given up on
     assert result.video_id == "v"
@@ -57,14 +64,10 @@ def test_transport_error_never_ages_into_give_up_even_past_the_window(tmp_path) 
 def test_unavailable_gives_up_after_window(tmp_path) -> None:
     old_enough = datetime.now(UTC) - GIVE_UP_AFTER - timedelta(hours=1)
     video = _video(old_enough)
-    queue = Queue(path=tmp_path / "q.json")
-    client = object()
-    app = object()
+    poller = _poller(tmp_path)
 
     with patch("knowledger.poller.fetch_transcript", side_effect=TranscriptUnavailable("v")):
-        result = asyncio.run(
-            _process_video(app, _config(), client, queue, "proj", video, datetime.now(UTC))
-        )
+        result = asyncio.run(poller._process_video("proj", video, datetime.now(UTC)))
 
     assert result is None  # given up
 
@@ -72,14 +75,10 @@ def test_unavailable_gives_up_after_window(tmp_path) -> None:
 def test_unavailable_within_window_stays_pending(tmp_path) -> None:
     recent = datetime.now(UTC) - timedelta(hours=1)
     video = _video(recent)
-    queue = Queue(path=tmp_path / "q.json")
-    client = object()
-    app = object()
+    poller = _poller(tmp_path)
 
     with patch("knowledger.poller.fetch_transcript", side_effect=TranscriptUnavailable("v")):
-        result = asyncio.run(
-            _process_video(app, _config(), client, queue, "proj", video, datetime.now(UTC))
-        )
+        result = asyncio.run(poller._process_video("proj", video, datetime.now(UTC)))
 
     assert result is not None
     assert result.video_id == "v"
