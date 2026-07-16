@@ -14,7 +14,13 @@ dependencies = [
 ]
 
 [dependency-groups]
-dev = ["pre-commit>=4.0.0", "pytest>=8.0.0"]
+dev = [
+    "pre-commit>=4.0.0",
+    "pytest>=8.0.0",
+    "pyright>=1.1.390",
+    "bandit>=1.8.0",
+    "vulture>=2.14",
+]
 
 [build-system]
 requires = ["hatchling"]
@@ -34,3 +40,14 @@ known-first-party = ["knowledger"]
 [tool.pyright]
 venvPath = "."
 venv = ".venv"
+# A custom "exclude" replaces pyright's default excludes (node_modules, __pycache__,
+# dot-directories) entirely rather than adding to them — so "include" is scoped to the
+# real project paths instead, keeping .venv/.git/.claude out of scope implicitly.
+include = ["knowledger", "cli.py", "main.py", "scripts", "tests"]
+# scripts/transcribe.py depends on faster-whisper/ctranslate2, installed only in the
+# separate .venv-transcribe (see its docstring) — not in the main venv pyright checks against.
+exclude = ["scripts/transcribe.py"]
+
+[tool.vulture]
+paths = ["knowledger", "cli.py", "main.py", "scripts"]
+min_confidence = 80

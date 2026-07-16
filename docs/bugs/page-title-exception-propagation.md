@@ -1,6 +1,6 @@
 # Bug: Page-Title Exception Discards oEmbed Title
 
-**Severity:** Medium  
+**Severity:** Medium
 **File:** `knowledger/youtube.py:65`
 
 ## Description

@@ -64,7 +64,9 @@ def _keyboard_for(projects: list[Project], msg_id: int | str) -> InlineKeyboardM
 
 
 def _build_keyboard(
-    projects: list[Project], msg_id: int | str, whitelist: frozenset[str]
+    projects: list[Project],
+    msg_id: int | str,
+    whitelist: frozenset[str],
 ) -> InlineKeyboardMarkup:
     """Whitelist-filtered view, with a "More..." row when it hides any project — the
     caller wanting the unfiltered list uses `_keyboard_for` directly instead of passing
@@ -119,7 +121,7 @@ async def cmd_start(update: Update, context: CustomContext, user: User) -> None:
         return
     await update.message.reply_text(
         "Send me a YouTube URL and I'll let you pick a Claude project to save the "
-        "transcript to.\n\nCommands: /refresh — reload project list, /help — show this message"
+        "transcript to.\n\nCommands: /refresh — reload project list, /help — show this message",
     )
 
 
@@ -148,7 +150,9 @@ async def cmd_refresh(update: Update, context: CustomContext, user: User) -> Non
 
     try:
         result = await context.bot_data["queue_processor"].drain(
-            context.application, context.bot_data["config"], client
+            context.application,
+            context.bot_data["config"],
+            client,
         )
     except Exception as e:
         logger.exception("Queue drain failed")
@@ -196,7 +200,9 @@ async def handle_youtube_url(update: Update, context: CustomContext, user: User)
 
     try:
         metadata = await asyncio.to_thread(
-            fetch_video_metadata, url, context.bot_data["config"].transcript.proxy
+            fetch_video_metadata,
+            url,
+            context.bot_data["config"].transcript.proxy,
         )
     except (RequestException, ValueError) as e:
         logger.exception("Failed to fetch metadata for %s", url)
@@ -210,7 +216,7 @@ async def handle_youtube_url(update: Update, context: CustomContext, user: User)
         return
     if not projects:
         await update.message.reply_text(
-            "No projects found. Use /refresh to reload your Claude projects."
+            "No projects found. Use /refresh to reload your Claude projects.",
         )
         return
 
@@ -218,7 +224,9 @@ async def handle_youtube_url(update: Update, context: CustomContext, user: User)
     context.user_data[f"video_{msg_id}"] = metadata
 
     keyboard = _build_keyboard(
-        projects, msg_id, context.bot_data["config"].telegram.project_whitelist
+        projects,
+        msg_id,
+        context.bot_data["config"].telegram.project_whitelist,
     )
 
     safe_title = escape_markdown(metadata.title, version=1)
@@ -270,7 +278,8 @@ async def handle_project_selection(update: Update, context: CustomContext, user:
 
     try:
         docs: list[Doc] = await asyncio.to_thread(
-            context.bot_data["claude_client"].list_docs, project_id
+            context.bot_data["claude_client"].list_docs,
+            project_id,
         )
     except AuthError as e:
         await query.edit_message_text(f"Auth error: {e}")
@@ -283,17 +292,20 @@ async def handle_project_selection(update: Update, context: CustomContext, user:
     existing = next((d for d in docs if d["file_name"] == file_name), None)
     if existing:
         context.user_data[f"pending_{msg_id_str}"] = PendingUpload(
-            project_id=project_id, file_name=file_name, video_id=metadata.video_id
+            project_id=project_id,
+            file_name=file_name,
+            video_id=metadata.video_id,
         )
         keyboard = InlineKeyboardMarkup(
             [
                 [
                     InlineKeyboardButton("Skip", callback_data=f"skip:{msg_id_str}"),
                     InlineKeyboardButton(
-                        "Overwrite", callback_data=f"overwrite:{existing['uuid']}:{msg_id_str}"
+                        "Overwrite",
+                        callback_data=f"overwrite:{existing['uuid']}:{msg_id_str}",
                     ),
-                ]
-            ]
+                ],
+            ],
         )
         safe_name = escape_markdown(file_name, version=1)
         await query.edit_message_text(
@@ -321,7 +333,7 @@ async def handle_project_selection(update: Update, context: CustomContext, user:
         return
     except TranscriptTransportError:
         await query.edit_message_text(
-            "Transcript request was blocked — this is usually temporary. Please try again shortly."
+            "Transcript request was blocked — this is usually temporary. Please try again shortly.",
         )
         return
 
@@ -366,7 +378,7 @@ async def handle_project_selection(update: Update, context: CustomContext, user:
                 logger.exception("Failed to enqueue %s", file_name)
                 await query.edit_message_text(
                     "Token expired and queuing failed — please resend the URL after "
-                    "updating the token."
+                    "updating the token.",
                 )
                 return
             escaped = escape_markdown(file_name, version=1)
@@ -429,7 +441,7 @@ async def handle_duplicate_choice(update: Update, context: CustomContext, user: 
         return
     except TranscriptTransportError:
         await query.edit_message_text(
-            "Transcript request was blocked — this is usually temporary. Please try again shortly."
+            "Transcript request was blocked — this is usually temporary. Please try again shortly.",
         )
         return
 
@@ -458,7 +470,7 @@ async def handle_duplicate_choice(update: Update, context: CustomContext, user: 
     except PersistenceError:
         logger.exception("Failed to durably queue overwrite for %s", pending["file_name"])
         await query.edit_message_text(
-            "Overwrite failed to queue durably — please retry the overwrite."
+            "Overwrite failed to queue durably — please retry the overwrite.",
         )
         return
     if persisted is None:
@@ -499,25 +511,27 @@ async def handle_duplicate_choice(update: Update, context: CustomContext, user: 
                     pending["project_id"],
                 )
                 await query.edit_message_text(
-                    f"Saved *{escaped}* to project.", parse_mode="Markdown"
+                    f"Saved *{escaped}* to project.",
+                    parse_mode="Markdown",
                 )
             case AlreadyExists():
                 # Old doc already gone and a replacement already exists: a prior
                 # attempt landed and we just never saw the confirmation.
                 queue.ack(claimed.id)
                 await query.edit_message_text(
-                    f"*{escaped}* was already overwritten.", parse_mode="Markdown"
+                    f"*{escaped}* was already overwritten.",
+                    parse_mode="Markdown",
                 )
             case DeferredForAuth(step=step, error=error):
                 queue.release(claimed.id)
                 await query.edit_message_text(
-                    f"Auth error while {step} — overwrite queued for retry: {error}"
+                    f"Auth error while {step} — overwrite queued for retry: {error}",
                 )
             case RetryPending(step=step, error=error):
                 queue.release(claimed.id, increment_attempts=True)
                 await query.edit_message_text(
                     f"Overwrite failed while {step}: {error}. It has been queued and will "
-                    "retry automatically."
+                    "retry automatically.",
                 )
     except Exception:
         # Anything unexpected (a programming error, a malformed API response) must
@@ -527,7 +541,7 @@ async def handle_duplicate_choice(update: Update, context: CustomContext, user: 
         logger.exception("Unexpected error during overwrite for %s", claimed.file_name)
         queue.release(claimed.id, increment_attempts=True)
         await query.edit_message_text(
-            "Unexpected error during overwrite — it has been queued and will retry automatically."
+            "Unexpected error during overwrite — it has been queued and will retry automatically.",
         )
     finally:
         # The durable QueueEntry (not this dict) now owns retry state regardless of
@@ -546,7 +560,8 @@ def build_application(config: Config) -> Application:
     )
     app.bot_data["config"] = config
     app.bot_data["claude_client"] = ClaudeClient(
-        config.claude.session_token, persist_path=config.storage.data_dir / "session_token.json"
+        config.claude.session_token,
+        persist_path=config.storage.data_dir / "session_token.json",
     )
     queue = Queue(path=config.storage.data_dir / "petition_queue.json")
     recovered = queue.recover_abandoned()
@@ -563,7 +578,7 @@ def build_application(config: Config) -> Application:
     app.add_handler(CommandHandler("help", cmd_help))
     app.add_handler(CommandHandler("refresh", cmd_refresh))
     app.add_handler(
-        MessageHandler(filters.TEXT & filters.Regex(YOUTUBE_URL_PATTERN), handle_youtube_url)
+        MessageHandler(filters.TEXT & filters.Regex(YOUTUBE_URL_PATTERN), handle_youtube_url),
     )
     app.add_handler(CallbackQueryHandler(handle_duplicate_choice, pattern=r"^(skip|overwrite):"))
     app.add_handler(CallbackQueryHandler(handle_project_selection))

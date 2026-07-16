@@ -48,6 +48,7 @@ docker run -d --name knowledger --restart unless-stopped --env-file .env knowled
 ```
 
 Check logs:
+
 ```bash
 docker logs -f knowledger
 ```

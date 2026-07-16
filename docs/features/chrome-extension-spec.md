@@ -17,12 +17,14 @@ The knowledger bot authenticates with Claude using a `sessionKey` session cookie
 A background service worker listens to `chrome.cookies.onChanged`. When a new `sessionKey` is set on `https://claude.ai`, it POSTs the token to the bot's `/update-token` HTTP endpoint. The bot handles account filtering server-side via `PERSONAL_ORG_ID` — the extension sends blindly for every login.
 
 **Full user flow after installation:**
+
 1. Log back into personal Claude account on desktop Chrome
 2. Extension detects the new `sessionKey` cookie
 3. Extension POSTs token to bot endpoint in the background
 4. Bot is fixed — no manual steps required
 
 **When logging into the work account:**
+
 1. Extension detects the new `sessionKey`
 2. Extension POSTs it to the bot
 3. Bot calls the Claude API, sees the org doesn't match `PERSONAL_ORG_ID`, returns `403`
@@ -59,6 +61,7 @@ Two files total. No popup, no options page, no icons required.
 ```
 
 **Permissions:**
+
 - `"cookies"` — required to listen to `chrome.cookies.onChanged` and read HttpOnly cookies
 - `"https://claude.ai/*"` — host permission scoping cookie access to claude.ai only
 

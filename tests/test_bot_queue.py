@@ -1,14 +1,16 @@
 import asyncio
 from pathlib import Path
+from typing import cast
 
 import pytest
 from curl_cffi.requests.exceptions import RequestException
+from telegram.ext import Application
 
 from knowledger.bot import drain_queue
-from knowledger.claude_client import AuthError
+from knowledger.claude_client import AuthError, ClaudeClient
 from knowledger.config import ClaudeSettings, Config, LoggerConfig, TelegramSettings
 from knowledger.queue import Queue, QueueEntry
-from knowledger.queue_processor import MAX_UPLOAD_ATTEMPTS, QueueProcessor
+from knowledger.queue_processor import MAX_UPLOAD_ATTEMPTS, DrainResult, QueueProcessor
 
 
 class FakeBot:
@@ -55,6 +57,21 @@ class FakeClaudeClient:
         self.docs[project_id] = [d for d in self.docs.get(project_id, []) if d["uuid"] != uuid]
 
 
+async def _drain(
+    app: FakeTelegramApp,
+    config: Config,
+    client: FakeClaudeClient,
+    queue: Queue,
+    processor: QueueProcessor | None = None,
+) -> DrainResult:
+    """Cast the fakes to the real protocol types drain_queue expects — they satisfy the
+    subset of the interface it actually uses (bot.send_message / list_docs / upload_content /
+    delete_doc), but aren't nominal subclasses of Application / ClaudeClient."""
+    return await drain_queue(
+        cast(Application, app), config, cast(ClaudeClient, client), queue, processor
+    )
+
+
 def _config() -> Config:
     return Config(
         logger=LoggerConfig(),
@@ -83,7 +100,7 @@ def test_success_notifies_and_drops_entry(tmp_path: Path) -> None:
     client = FakeClaudeClient()
     app = FakeTelegramApp()
 
-    result = asyncio.run(drain_queue(app, _config(), client, queue))
+    result = asyncio.run(_drain(app, _config(), client, queue))
 
     assert result.uploaded == 1
     assert queue.peek() == []
@@ -97,13 +114,13 @@ def test_auth_error_releases_silently_then_succeeds(tmp_path: Path) -> None:
     client.fail_auth_times = 1
     app = FakeTelegramApp()
 
-    result = asyncio.run(drain_queue(app, _config(), client, queue))
+    result = asyncio.run(_drain(app, _config(), client, queue))
     assert result.failed_auth == 1
     assert len(queue.peek()) == 1
     assert queue.peek()[0].state == "pending"  # released, not lost
     assert app.bot.sent == []  # no message on auth failure
 
-    result = asyncio.run(drain_queue(app, _config(), client, queue))
+    result = asyncio.run(_drain(app, _config(), client, queue))
     assert result.uploaded == 1
 
 
@@ -116,11 +133,11 @@ def test_alert_fires_once_at_threshold_then_recovers(tmp_path: Path) -> None:
     config = _config()
 
     for _ in range(MAX_UPLOAD_ATTEMPTS):
-        asyncio.run(drain_queue(app, config, client, queue))
+        asyncio.run(_drain(app, config, client, queue))
     assert len(app.bot.sent) == 1
     assert "stuck" in app.bot.sent[0][1]
 
-    result = asyncio.run(drain_queue(app, config, client, queue))
+    result = asyncio.run(_drain(app, config, client, queue))
     assert result.uploaded == 1
 
 
@@ -131,7 +148,7 @@ def test_overwrite_deletes_old_doc_then_uploads(tmp_path: Path) -> None:
     queue.enqueue(_entry("v4", "f4", transcript="new", overwrite_doc_uuid="old-uuid"))
     app = FakeTelegramApp()
 
-    result = asyncio.run(drain_queue(app, _config(), client, queue))
+    result = asyncio.run(_drain(app, _config(), client, queue))
 
     assert result.uploaded == 1
     assert client.docs["p"] == [{"uuid": "u1", "file_name": "f4"}]
@@ -145,7 +162,7 @@ def test_overwrite_retry_after_delete_already_landed_is_idempotent(tmp_path: Pat
     queue.enqueue(_entry("v5", "f5", overwrite_doc_uuid="already-gone-uuid"))
     app = FakeTelegramApp()
 
-    result = asyncio.run(drain_queue(app, _config(), client, queue))
+    result = asyncio.run(_drain(app, _config(), client, queue))
 
     assert result.uploaded == 1
 
@@ -161,7 +178,7 @@ def test_overwrite_retry_after_lost_confirmation_is_not_duplicated(tmp_path: Pat
     app = FakeTelegramApp()
 
     calls_before = client.upload_calls
-    result = asyncio.run(drain_queue(app, _config(), client, queue))
+    result = asyncio.run(_drain(app, _config(), client, queue))
 
     assert result.already_existed == 1
     assert client.upload_calls == calls_before
@@ -181,12 +198,12 @@ def test_transient_list_docs_failure_releases_overwrite_without_skipping_delete(
     app = FakeTelegramApp()
     config = _config()
 
-    result = asyncio.run(drain_queue(app, config, client, queue))
+    result = asyncio.run(_drain(app, config, client, queue))
     assert result.failed_other == 1
     assert len(queue.peek()) == 1
     assert any(d["uuid"] == "still-there" for d in client.docs["p"])  # delete NOT skipped
 
-    result = asyncio.run(drain_queue(app, config, client, queue))
+    result = asyncio.run(_drain(app, config, client, queue))
     assert result.uploaded == 1
     assert not any(d["uuid"] == "still-there" for d in client.docs["p"])
 
@@ -203,8 +220,8 @@ def test_two_concurrent_drains_upload_an_entry_once(tmp_path: Path) -> None:
 
     async def _run_both() -> tuple:
         return await asyncio.gather(
-            processor.drain(app, _config(), client),
-            processor.drain(app, _config(), client),
+            processor.drain(cast(Application, app), _config(), cast(ClaudeClient, client)),
+            processor.drain(cast(Application, app), _config(), cast(ClaudeClient, client)),
         )
 
     results = asyncio.run(_run_both())
@@ -239,7 +256,7 @@ def test_release_failure_propagates_and_does_not_lose_other_entries(tmp_path: Pa
     app = FakeTelegramApp()
 
     with pytest.raises(OSError):
-        asyncio.run(drain_queue(app, _config(), client, queue))
+        asyncio.run(_drain(app, _config(), client, queue))
 
     # Nothing was lost: A is still claimed (in_flight) as of the crash, B untouched.
     remaining = {e.video_id: e for e in queue.peek()}
@@ -248,7 +265,7 @@ def test_release_failure_propagates_and_does_not_lose_other_entries(tmp_path: Pa
     # A fresh drain recovers the abandoned claim and both entries eventually succeed.
     queue.recover_abandoned()
     client.fail_auth_times = 0
-    result = asyncio.run(drain_queue(app, _config(), client, queue))
+    result = asyncio.run(_drain(app, _config(), client, queue))
     assert result.uploaded == 2
 
 

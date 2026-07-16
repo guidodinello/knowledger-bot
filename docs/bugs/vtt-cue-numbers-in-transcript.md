@@ -1,6 +1,6 @@
 # Bug: VTT Cue Sequence Numbers Bleed into Transcript
 
-**Severity:** Low  
+**Severity:** Low
 **File:** `knowledger/invidious.py:22-35`
 
 ## Description

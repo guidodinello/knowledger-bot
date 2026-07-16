@@ -7,6 +7,7 @@ Manual workflow for saving YouTube video transcripts into Claude project knowled
 ## Architecture
 
 Telegram bot (long-polling) with three subsystems:
+
 1. **YouTube** — extract video ID from URL, fetch metadata via oEmbed, fetch transcript via `youtube-transcript-api`
 2. **Claude client** — list projects and upload content via unofficial web API (adapted from `weekly-highlights/clients/claude_uploader.py`)
 3. **Telegram bot** — handles user interaction, project picker with inline buttons
@@ -57,6 +58,7 @@ dependencies = [
 ## Implementation Steps
 
 ### Step 1: Project skeleton and config
+
 - Create `knowledger/` package with `__init__.py`
 - Create `knowledger/config.py` — load and validate env vars from `.env`
 - Update `pyproject.toml` with dependencies
@@ -64,15 +66,19 @@ dependencies = [
 - Run `uv sync`
 
 ### Step 2: YouTube metadata (`knowledger/youtube.py`)
+
 - `extract_video_id(url) -> str | None` — parse video ID from youtube.com/watch, youtu.be, youtube.com/shorts URLs using `urllib.parse`
 - `fetch_video_metadata(url) -> VideoMetadata` — call YouTube oEmbed endpoint (`https://www.youtube.com/oembed?url=...&format=json`) via `curl_cffi`, return dataclass with `title`, `channel_name`, `video_id`
 - `sanitize_filename(text) -> str` — strip characters illegal in filenames from title/channel
 
 ### Step 3: Transcript fetching (`knowledger/transcript.py`)
+
 - `fetch_transcript(video_id) -> str | None` — use `YouTubeTranscriptApi.fetch(video_id)`, join snippet `.text` fields with newlines. Return `None` on `TranscriptsDisabled`/`NoTranscriptFound`.
 
 ### Step 4: Claude client (`knowledger/claude_client.py`)
+
 Adapt from `/home/guido/projects/weekly-highlights/clients/claude_uploader.py` with these changes:
+
 - Constructor takes only `session_token` (no project_id) — project is selected per-interaction
 - Keep `_get_organization_id()`, `_get_headers()` as-is
 - Add `list_projects() -> list[dict]` — `GET /api/organizations/{org_id}/projects` (verify endpoint during implementation)
@@ -80,13 +86,16 @@ Adapt from `/home/guido/projects/weekly-highlights/clients/claude_uploader.py` w
 - On 401/403, raise a clear error so the bot can notify the user about token expiration
 
 ### Step 5: Telegram bot (`knowledger/bot.py`)
+
 **Conversation flow:**
+
 1. User sends YouTube URL → bot validates, fetches metadata via oEmbed
 2. Bot replies with video info + inline keyboard (one button per Claude project)
 3. User taps project button → bot fetches transcript, constructs filename (`Youtube - {channel} - {title}`), uploads to selected project
 4. Bot confirms success or reports error (no captions, upload failure, etc.)
 
 **Implementation details:**
+
 - `python-telegram-bot` v21+ with `Application.builder().token().build()`
 - `MessageHandler` with regex filter for YouTube URLs
 - `CallbackQueryHandler` for project selection buttons
@@ -99,9 +108,11 @@ Adapt from `/home/guido/projects/weekly-highlights/clients/claude_uploader.py` w
 **Commands:** `/start` (welcome), `/refresh` (re-fetch projects), `/help`
 
 ### Step 6: Entry point (`main.py`)
+
 - Validate config, create bot, run polling
 
 ### Step 7: Deployment
+
 - `Dockerfile` — Python 3.13-slim + uv, install deps, run bot
 - `railway.toml` — worker process (no HTTP service), primary region `iad`
 - Secrets set via `railway secrets set`

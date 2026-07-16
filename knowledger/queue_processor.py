@@ -43,7 +43,10 @@ class QueueProcessor:
         self._lock = asyncio.Lock()
 
     async def drain(
-        self, telegram_app: Application, config: Config, client: ClaudeClient
+        self,
+        telegram_app: Application,
+        config: Config,
+        client: ClaudeClient,
     ) -> DrainResult:
         """Attempt every currently-queued entry once. Serialized by the lock so two
         concurrent triggers (e.g. /refresh and a token-update drain) never process the
@@ -52,7 +55,10 @@ class QueueProcessor:
             return await self._drain_locked(telegram_app, config, client)
 
     async def _drain_locked(
-        self, telegram_app: Application, config: Config, client: ClaudeClient
+        self,
+        telegram_app: Application,
+        config: Config,
+        client: ClaudeClient,
     ) -> DrainResult:
         service = TranscriptUploadService(client)
         result = DrainResult()
@@ -64,7 +70,13 @@ class QueueProcessor:
                 break
             attempted.add(entry.id)
             await self._process_entry(
-                entry, telegram_app, config, client, service, docs_by_project, result
+                entry,
+                telegram_app,
+                config,
+                client,
+                service,
+                docs_by_project,
+                result,
             )
         return result
 
@@ -81,7 +93,8 @@ class QueueProcessor:
         if entry.project_id not in docs_by_project:
             try:
                 docs_by_project[entry.project_id] = await asyncio.to_thread(
-                    client.list_docs, entry.project_id
+                    client.list_docs,
+                    entry.project_id,
                 )
             except AuthError:
                 self._queue.release(entry.id)
@@ -117,7 +130,9 @@ class QueueProcessor:
                 result.uploaded += 1
                 escaped = escape_markdown(entry.file_name, version=1)
                 await telegram_app.bot.send_message(
-                    entry.chat_id, f"Queued upload saved: *{escaped}*", parse_mode="Markdown"
+                    entry.chat_id,
+                    f"Queued upload saved: *{escaped}*",
+                    parse_mode="Markdown",
                 )
             case AlreadyExists():
                 logger.info("Queued entry already uploaded, skipping: %s", entry.file_name)
@@ -128,7 +143,10 @@ class QueueProcessor:
                 result.failed_auth += 1
             case RetryPending(step=step, error=error):
                 logger.warning(
-                    "Queue retry failed for %s while %s: %s", entry.file_name, step, error
+                    "Queue retry failed for %s while %s: %s",
+                    entry.file_name,
+                    step,
+                    error,
                 )
                 await self._release_with_alert(
                     telegram_app,

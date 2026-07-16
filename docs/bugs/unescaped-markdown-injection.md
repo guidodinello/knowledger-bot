@@ -1,6 +1,6 @@
 # Bug: Unescaped Markdown in Bot Messages
 
-**Severity:** High  
+**Severity:** High
 **Files:** `knowledger/bot.py:117-120`, `knowledger/bot.py:178`
 
 ## Description

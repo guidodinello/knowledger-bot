@@ -1,7 +1,7 @@
 # Feature: Persistent Upload Queue on Token Failure
 
-**Value:** High  
-**Effort:** Low-Medium  
+**Value:** High
+**Effort:** Low-Medium
 **Touches:** `knowledger/queue.py` (new), `knowledger/bot.py`
 
 ## Problem
@@ -30,10 +30,10 @@ QueueEntry  (frozen dataclass)
   queued_at: str   # ISO-8601, for display only
 ```
 
-`enqueue(entry: QueueEntry, path: Path = QUEUE_FILE) -> bool`  
+`enqueue(entry: QueueEntry, path: Path = QUEUE_FILE) -> bool`
 Load the current queue from `path`. Check for an existing entry with the same `(project_id, file_name)` pair. If a duplicate is found, return `False` without writing. Otherwise append and save, return `True`.
 
-`drain_queue(path: Path = QUEUE_FILE) -> list[QueueEntry]`  
+`drain_queue(path: Path = QUEUE_FILE) -> list[QueueEntry]`
 Read all entries from `path`, atomically replace the file with an empty list, and return the entries. Treats a missing or corrupt file as an empty queue (log a warning).
 
 `QUEUE_FILE = Path("petition_queue.json")`
