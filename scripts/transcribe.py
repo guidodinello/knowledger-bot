@@ -19,7 +19,7 @@ The transcribe.sh wrapper sets LD_LIBRARY_PATH for the CUDA 12 libs bundled in .
 
 import argparse
 import logging
-import subprocess
+import subprocess  # nosec B404 - local CLI tool, not exposed to untrusted input
 import sys
 import tempfile
 from pathlib import Path
@@ -29,7 +29,7 @@ from faster_whisper import WhisperModel
 
 
 def _run_ytdlp(args: list[str], output_dir: Path) -> Path:
-    result = subprocess.run(
+    result = subprocess.run(  # nosec B603 - args built from this script's own CLI arguments, not untrusted input
         args,
         capture_output=True,
         text=True,
@@ -63,7 +63,9 @@ def _default_args(url: str, output_dir: Path) -> list[str]:
 
 def _android_fallback_args(url: str, output_dir: Path) -> list[str]:
     return _build_args(
-        url, output_dir, ["--extractor-args", "youtube:player_client=android", "-f", "18"]
+        url,
+        output_dir,
+        ["--extractor-args", "youtube:player_client=android", "-f", "18"],
     )
 
 
@@ -94,7 +96,7 @@ def download_audio(url: str, output_dir: Path, cookies_path: Path | None = None)
             logging.warning("%s strategy failed (exit %d)", label, e.returncode)
 
     raise RuntimeError(
-        f"All download strategies failed for {url}. Try a newer yt-dlp version or use --cookies."
+        f"All download strategies failed for {url}. Try a newer yt-dlp version or use --cookies.",
     )
 
 
@@ -139,7 +141,7 @@ def transcribe(
 
 def main() -> None:
     parser = argparse.ArgumentParser(
-        description="Transcribe a YouTube video or Instagram Reel with faster-whisper"
+        description="Transcribe a YouTube video or Instagram Reel with faster-whisper",
     )
     parser.add_argument("url", help="YouTube or Instagram Reel URL")
     parser.add_argument("-o", "--output", help="Output file (default: stdout)")
@@ -153,7 +155,8 @@ def main() -> None:
         ),
     )
     parser.add_argument(
-        "--language", help="Force transcription language (e.g. es, en); default: auto-detect"
+        "--language",
+        help="Force transcription language (e.g. es, en); default: auto-detect",
     )
     args = parser.parse_args()
 
@@ -165,7 +168,10 @@ def main() -> None:
     with tempfile.TemporaryDirectory(prefix="whisper_") as tmp:
         audio_path = download_audio(args.url, Path(tmp), cookies_path=cookies_path)
         text = transcribe(
-            audio_path, model_size=args.model, device=args.device, language=args.language
+            audio_path,
+            model_size=args.model,
+            device=args.device,
+            language=args.language,
         )
 
     if args.output:

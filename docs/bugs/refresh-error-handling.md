@@ -1,6 +1,6 @@
 # Bug: /refresh Drops Non-Auth Network Errors
 
-**Severity:** Low  
+**Severity:** Low
 **File:** `knowledger/bot.py:78-84`
 
 ## Description

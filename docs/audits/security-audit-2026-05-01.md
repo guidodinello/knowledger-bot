@@ -1,8 +1,8 @@
 # Application Security Audit
 
-**System:** knowledger — Telegram bot + HTTP token-update server  
-**Date:** 2026-05-01  
-**Auditor:** Claude Code (claude-sonnet-4-6)  
+**System:** knowledger — Telegram bot + HTTP token-update server
+**Date:** 2026-05-01
+**Auditor:** Claude Code (claude-sonnet-4-6)
 **Scope:** Full static analysis — authentication, authorization, injection sinks, secrets management, HTTP API surface, CORS configuration, external dependency trust, Telegram bot input handling
 
 ---
@@ -129,19 +129,19 @@ if not url.startswith("/"):
 
 ### INFO
 
-**I-1: Positive control — `.env` files correctly excluded from git**  
+**I-1: Positive control — `.env` files correctly excluded from git**
 `.gitignore` excludes `.env*` patterns; only `.env.example` is tracked. `git ls-files` confirms no secrets are in version history.
 
-**I-2: Positive control — Telegram auth is strict allowlist, not role-based**  
+**I-2: Positive control — Telegram auth is strict allowlist, not role-based**
 `ALLOWED_USER_IDS` must be explicitly populated. No "any authenticated Telegram user" path exists. `_require_auth` is applied as a decorator to every sensitive command handler.
 
-**I-3: Positive control — org_id double-validation on HTTP endpoint**  
+**I-3: Positive control — org_id double-validation on HTTP endpoint**
 When `PERSONAL_ORG_ID` is set, the endpoint calls `get_org_id_for_token(new_token)` and rejects tokens that don't belong to the expected account. This prevents an attacker who submits a valid-but-foreign token from hijacking the client.
 
-**I-4: Positive control — token deletion on Telegram update**  
+**I-4: Positive control — token deletion on Telegram update**
 The bot attempts `update.message.delete()` and warns the user if deletion fails. This reduces the window during which the token is visible in chat history.
 
-**I-5: Runtime assessment required — network exposure of port 8080**  
+**I-5: Runtime assessment required — network exposure of port 8080**
 Whether the HTTP endpoint is reachable from the public internet depends on the deployment firewall (Oracle Cloud security list, Railway private networking). Static analysis cannot verify this. Confirm that port 8080 is not publicly accessible unless required by the browser extension use case.
 
 ---
@@ -194,7 +194,7 @@ Whether the HTTP endpoint is reachable from the public internet depends on the d
 
 - [OWASP Authentication Cheat Sheet](https://cheatsheetseries.owasp.org/cheatsheets/Authentication_Cheat_Sheet.html)
 - [OWASP CORS Security](https://owasp.org/www-community/attacks/CORS_OriginHeaderScrutiny)
-- [OWASP Timing Attack](https://owasp.org/www-community/attacks/Timing_attack) — Python `hmac.compare_digest` docs: https://docs.python.org/3/library/hmac.html#hmac.compare_digest
+- [OWASP Timing Attack](https://owasp.org/www-community/attacks/Timing_attack) — Python `hmac.compare_digest` docs: <https://docs.python.org/3/library/hmac.html#hmac.compare_digest>
 - [OWASP SSRF](https://owasp.org/www-community/attacks/Server_Side_Request_Forgery)
 - [aiohttp Security — client_max_size](https://docs.aiohttp.org/en/stable/web_advanced.html#data-size-limits)
 

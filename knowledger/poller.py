@@ -186,7 +186,7 @@ def fetch_feed(channel_id: str, proxy: ProxyConfig | None = None) -> list[Pendin
                 channel_name=channel_name or "",
                 published=published,
                 first_seen=now,
-            )
+            ),
         )
     return videos
 
@@ -285,7 +285,10 @@ class TranscriptPoller:
         self._project_name = project_name
 
     async def _process_video(
-        self, project_id: str, video: PendingVideo, now: datetime
+        self,
+        project_id: str,
+        video: PendingVideo,
+        now: datetime,
     ) -> PendingVideo | None:
         """Fetch + upload one due video. Returns the (possibly updated) video to keep
         it in the pending list, or None once it's done — confirmed uploaded, or
@@ -306,7 +309,9 @@ class TranscriptPoller:
             if now - first_seen >= GIVE_UP_AFTER:
                 logger.info("Giving up on %s — no captions after %s", video.video_id, GIVE_UP_AFTER)
                 await notify(
-                    self._app, self._config, f"⚠️ No captions for “{video.title}” — gave up."
+                    self._app,
+                    self._config,
+                    f"⚠️ No captions for “{video.title}” — gave up.",
                 )
                 return None
             logger.info("Transcript not ready for %s; will retry", video.video_id)
@@ -330,10 +335,17 @@ class TranscriptPoller:
                 return None
             case DeferredForAuth():
                 _enqueue_auth_fallback(
-                    self._queue, project_id, video, transcript, file_name, self._config
+                    self._queue,
+                    project_id,
+                    video,
+                    transcript,
+                    file_name,
+                    self._config,
                 )
                 await notify(
-                    self._app, self._config, f"Token expired — “{file_name}” queued. Run /refresh."
+                    self._app,
+                    self._config,
+                    f"Token expired — “{file_name}” queued. Run /refresh.",
                 )
                 return video  # keep pending until we confirm the upload landed
             case RetryPending(step=step, error=error):
@@ -342,7 +354,10 @@ class TranscriptPoller:
                 # transient listing failure silently retried unnoticed. Folding both
                 # into the same retry-classification closes that gap.
                 logger.warning(
-                    "Upload attempt failed for %s while %s: %s; will retry", file_name, step, error
+                    "Upload attempt failed for %s while %s: %s; will retry",
+                    file_name,
+                    step,
+                    error,
                 )
                 attempts = video.upload_attempts + 1
                 if attempts % MAX_UPLOAD_ATTEMPTS == 0:
@@ -361,11 +376,15 @@ class TranscriptPoller:
                 continue
             try:
                 videos = await asyncio.to_thread(
-                    fetch_feed, ch.channel_id, self._config.transcript.proxy
+                    fetch_feed,
+                    ch.channel_id,
+                    self._config.transcript.proxy,
                 )
             except Exception:
                 logger.warning(
-                    "Feed fetch failed for %s; skipping this tick", ch.handle, exc_info=True
+                    "Feed fetch failed for %s; skipping this tick",
+                    ch.handle,
+                    exc_info=True,
                 )
                 continue
             for video in videos:
@@ -395,7 +414,9 @@ class TranscriptPoller:
         if self._state.auth_error_notified:
             self._state.auth_error_notified = False
             await notify(
-                self._app, self._config, "✅ Claude session token restored — poller resumed."
+                self._app,
+                self._config,
+                "✅ Claude session token restored — poller resumed.",
             )
         if project_id is None:
             return
@@ -457,7 +478,10 @@ async def run_poller(app: Application, config: Config) -> None:
         return
 
     await asyncio.to_thread(
-        _resolve_missing_ids, channels, config.poller.channels_path, config.transcript.proxy
+        _resolve_missing_ids,
+        channels,
+        config.poller.channels_path,
+        config.transcript.proxy,
     )
 
     config.storage.data_dir.mkdir(parents=True, exist_ok=True)

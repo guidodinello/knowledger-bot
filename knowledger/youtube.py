@@ -2,12 +2,16 @@ import logging
 import re
 from dataclasses import dataclass
 from html.parser import HTMLParser
+from typing import TYPE_CHECKING
 from urllib.parse import parse_qs, urlparse
 
 from curl_cffi import requests
 from curl_cffi.requests.exceptions import RequestException
 
 from .config import ProxyConfig
+
+if TYPE_CHECKING:
+    from curl_cffi.requests.session import ProxySpec
 
 logger = logging.getLogger(__name__)
 
@@ -64,10 +68,11 @@ def extract_video_id(url: str) -> str | None:
 
 
 def _fetch_page_data(
-    video_id: str, proxy: ProxyConfig | None = None
+    video_id: str,
+    proxy: ProxyConfig | None = None,
 ) -> tuple[str | None, str | None]:
     """Return (title, upload_date) from the watch page. oEmbed truncates long titles."""
-    proxies = {"http": proxy.url, "https": proxy.url} if proxy else None  # type: ignore[arg-type]
+    proxies: ProxySpec | None = {"http": proxy.url, "https": proxy.url} if proxy else None
     response = requests.get(
         WATCH_URL,
         params={"v": video_id},

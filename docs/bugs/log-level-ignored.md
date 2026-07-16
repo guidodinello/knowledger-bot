@@ -1,6 +1,6 @@
 # Bug: LOG_LEVEL from .env Is Silently Ignored
 
-**Severity:** Low  
+**Severity:** Low
 **Files:** `knowledger/logger.py:5`, `main.py`
 
 ## Description

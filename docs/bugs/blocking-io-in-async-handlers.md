@@ -1,6 +1,6 @@
 # Bug: Blocking I/O Inside Async Handlers
 
-**Severity:** Medium  
+**Severity:** Medium
 **File:** `knowledger/bot.py:155`, `knowledger/bot.py:167`
 
 ## Description

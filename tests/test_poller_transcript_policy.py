@@ -1,9 +1,12 @@
 import asyncio
 from datetime import UTC, datetime, timedelta
+from typing import cast
 from unittest.mock import AsyncMock, patch
 
 import pytest
+from telegram.ext import Application
 
+from knowledger.claude_client import ClaudeClient
 from knowledger.config import ClaudeSettings, Config, LoggerConfig, TelegramSettings
 from knowledger.poller import GIVE_UP_AFTER, PendingVideo, PollerState, TranscriptPoller
 from knowledger.queue import Queue
@@ -31,9 +34,9 @@ def _video(first_seen: datetime) -> PendingVideo:
 
 def _poller(tmp_path, client=None, queue=None) -> TranscriptPoller:
     return TranscriptPoller(
-        app=object(),  # not touched by _process_video's own logic; used only via notify()
+        app=cast(Application, object()),  # not touched by _process_video; used via notify()
         config=_config(),
-        client=client if client is not None else object(),
+        client=cast(ClaudeClient, client if client is not None else object()),
         queue=queue if queue is not None else Queue(path=tmp_path / "q.json"),
         channels=[],
         state=PollerState(path=tmp_path / "state.json"),

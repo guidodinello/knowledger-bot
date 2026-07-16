@@ -79,7 +79,7 @@ class ClaudeClient:
         if response.status_code in (HTTPStatus.UNAUTHORIZED, HTTPStatus.FORBIDDEN):
             raise AuthError(
                 "Claude session token is invalid or expired. "
-                "Update CLAUDE_SESSION_TOKEN with a fresh sessionKey cookie from claude.ai."
+                "Update CLAUDE_SESSION_TOKEN with a fresh sessionKey cookie from claude.ai.",
             )
 
     def list_projects(self) -> list[Project]:

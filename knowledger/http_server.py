@@ -54,7 +54,8 @@ async def _handle_update_token(request: web.Request) -> web.Response:
 
     raw_secret = body.get("secret")
     if not isinstance(raw_secret, str) or not hmac.compare_digest(
-        raw_secret, settings.secret or ""
+        raw_secret,
+        settings.secret or "",
     ):
         return web.json_response({"error": "forbidden"}, status=403)
 
@@ -73,7 +74,9 @@ async def _handle_update_token(request: web.Request) -> web.Response:
             return web.json_response({"error": "validation failed"}, status=500)
         if org_id != settings.personal_org_id:
             logger.warning(
-                "Rejected token for org %s (expected %s)", org_id, settings.personal_org_id
+                "Rejected token for org %s (expected %s)",
+                org_id,
+                settings.personal_org_id,
             )
             return web.json_response({"error": "token belongs to wrong account"}, status=403)
 
@@ -101,7 +104,7 @@ def _make_cors_middleware(allowed_origin: str):
                     "Access-Control-Allow-Origin": allowed_origin,
                     "Access-Control-Allow-Methods": "POST",
                     "Access-Control-Allow-Headers": "Content-Type",
-                }
+                },
             )
         response = await handler(request)
         response.headers["Access-Control-Allow-Origin"] = allowed_origin
@@ -120,7 +123,7 @@ def build_aiohttp_app(
     (secret, personal_org_id, CORS origin) instead of also unpacking those same
     values as separate parameters."""
     app = web.Application(
-        middlewares=[_make_cors_middleware(config.token_server.cors_allowed_origin)]
+        middlewares=[_make_cors_middleware(config.token_server.cors_allowed_origin)],
     )
     app["claude_client"] = client
     app["queue_processor"] = processor
@@ -137,7 +140,7 @@ def build_aiohttp_app(
 async def run_http_server(aiohttp_app: web.Application, port: int) -> None:
     runner = web.AppRunner(aiohttp_app)
     await runner.setup()
-    await web.TCPSite(runner, "0.0.0.0", port).start()
+    await web.TCPSite(runner, "0.0.0.0", port).start()  # nosec B104 - container-internal listener, not exposed directly to the internet
     logger.info("Token update server listening on port %d", port)
     try:
         await asyncio.Event().wait()

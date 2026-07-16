@@ -65,7 +65,9 @@ def main() -> None:
     parser = argparse.ArgumentParser(description="Upload a YouTube transcript to a Claude project")
     parser.add_argument("url", help="YouTube video URL")
     parser.add_argument(
-        "--project", metavar="NAME", help="Claude project name (prompts if omitted)"
+        "--project",
+        metavar="NAME",
+        help="Claude project name (prompts if omitted)",
     )
     parser.add_argument("--cookies", metavar="PATH", help="Path to YouTube cookies file")
     args = parser.parse_args()
