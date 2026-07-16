@@ -408,7 +408,7 @@ class TranscriptPoller:
                     self._app,
                     self._config,
                     "⚠️ Claude session token expired — poller is paused. "
-                    "Update the token (POST /update-token) to resume.",
+                    "Update the token (`POST /update-token`) to resume.",
                 )
             return
         if self._state.auth_error_notified:
