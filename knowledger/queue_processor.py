@@ -16,6 +16,13 @@ from .config import Config
 from .logger import get_logger
 from .notify import notify
 from .queue import Queue, QueueEntry
+from .upload_service import (
+    AlreadyExists,
+    DeferredForAuth,
+    RetryPending,
+    TranscriptUploadService,
+    Uploaded,
+)
 
 logger = get_logger(__name__)
 
@@ -47,6 +54,7 @@ class QueueProcessor:
     async def _drain_locked(
         self, telegram_app: Application, config: Config, client: ClaudeClient
     ) -> DrainResult:
+        service = TranscriptUploadService(client)
         result = DrainResult()
         docs_by_project: dict[str, list[Doc]] = {}
         attempted: set[str] = set()
@@ -55,7 +63,9 @@ class QueueProcessor:
             if entry is None:
                 break
             attempted.add(entry.id)
-            await self._process_entry(entry, telegram_app, config, client, docs_by_project, result)
+            await self._process_entry(
+                entry, telegram_app, config, client, service, docs_by_project, result
+            )
         return result
 
     async def _process_entry(
@@ -64,6 +74,7 @@ class QueueProcessor:
         telegram_app: Application,
         config: Config,
         client: ClaudeClient,
+        service: TranscriptUploadService,
         docs_by_project: dict[str, list[Doc]],
         result: DrainResult,
     ) -> None:
@@ -77,9 +88,9 @@ class QueueProcessor:
                 result.failed_auth += 1
                 return
             except RequestException:
-                # Unknown state for this project — don't guess; release rather than risk
-                # treating "listing failed" as "the doc doesn't exist" for every entry
-                # sharing this project_id.
+                # Unknown state for this project — don't guess; release rather than
+                # risk treating "listing failed" as "the doc doesn't exist" for every
+                # entry sharing this project_id.
                 logger.exception("Failed to list docs for project %s", entry.project_id)
                 await self._release_with_alert(
                     telegram_app,
@@ -90,87 +101,48 @@ class QueueProcessor:
                     "{attempts}x in a row listing project docs. Check logs.",
                 )
                 return
-        docs = docs_by_project[entry.project_id]
+
+        outcome = await asyncio.to_thread(
+            service.upload,
+            entry.project_id,
+            entry.transcript,
+            entry.file_name,
+            overwrite_doc_uuid=entry.overwrite_doc_uuid,
+            docs=docs_by_project[entry.project_id],
+        )
 
         if entry.overwrite_doc_uuid is not None:
-            # The delete may have already landed on a prior attempt — check first so a
-            # retry never re-deletes (or 404s trying to delete) an already-gone doc.
-            if any(d["uuid"] == entry.overwrite_doc_uuid for d in docs):
-                try:
-                    await asyncio.to_thread(
-                        client.delete_doc, entry.project_id, entry.overwrite_doc_uuid
-                    )
-                except AuthError:
-                    self._queue.release(entry.id)
-                    result.failed_auth += 1
-                    return
-                except RequestException:
-                    logger.exception("Queued delete failed for %s", entry.file_name)
-                    await self._release_with_alert(
-                        telegram_app,
-                        config,
-                        entry,
-                        result,
-                        f"🛑 Queued overwrite stuck for “{entry.file_name}” — failed "
-                        "{attempts}x in a row deleting the old doc. Check logs.",
-                    )
-                    return
-                docs_by_project[entry.project_id] = [
-                    d for d in docs if d["uuid"] != entry.overwrite_doc_uuid
-                ]
-            elif any(d["file_name"] == entry.file_name for d in docs):
-                # Old doc already gone AND a doc with this name already exists: the
-                # replacement landed on a prior attempt whose confirmation we never saw
-                # (e.g. the response was lost). Uploading again would create a duplicate.
-                logger.info("Overwrite already landed, skipping: %s", entry.file_name)
+            # A successful delete (or upload attempt following one) invalidates the
+            # per-project cache for the rest of this drain — simpler than surgically
+            # patching it, at the cost of one possible extra list_docs call for a
+            # later entry sharing this project.
+            docs_by_project.pop(entry.project_id, None)
+
+        match outcome:
+            case Uploaded():
+                self._queue.ack(entry.id)
+                result.uploaded += 1
+                escaped = escape_markdown(entry.file_name, version=1)
+                await telegram_app.bot.send_message(
+                    entry.chat_id, f"Queued upload saved: *{escaped}*", parse_mode="Markdown"
+                )
+            case AlreadyExists():
+                logger.info("Queued entry already uploaded, skipping: %s", entry.file_name)
                 self._queue.ack(entry.id)
                 result.already_existed += 1
-                return
-            await self._upload_and_finish(entry, telegram_app, config, client, result)
-            return
-
-        if any(d["file_name"] == entry.file_name for d in docs):
-            logger.info("Queued entry already uploaded, skipping: %s", entry.file_name)
-            self._queue.ack(entry.id)
-            result.already_existed += 1
-            return
-
-        await self._upload_and_finish(entry, telegram_app, config, client, result)
-
-    async def _upload_and_finish(
-        self,
-        entry: QueueEntry,
-        telegram_app: Application,
-        config: Config,
-        client: ClaudeClient,
-        result: DrainResult,
-    ) -> None:
-        try:
-            await asyncio.to_thread(
-                client.upload_content, entry.project_id, entry.transcript, entry.file_name
-            )
-        except AuthError:
-            self._queue.release(entry.id)
-            result.failed_auth += 1
-            return
-        except RequestException:
-            logger.exception("Queue retry failed for %s", entry.file_name)
-            await self._release_with_alert(
-                telegram_app,
-                config,
-                entry,
-                result,
-                f"🛑 Queued upload stuck for “{entry.file_name}” — failed "
-                "{attempts}x in a row. Check logs; it will keep retrying.",
-            )
-            return
-
-        self._queue.ack(entry.id)
-        result.uploaded += 1
-        escaped = escape_markdown(entry.file_name, version=1)
-        await telegram_app.bot.send_message(
-            entry.chat_id, f"Queued upload saved: *{escaped}*", parse_mode="Markdown"
-        )
+            case DeferredForAuth():
+                self._queue.release(entry.id)
+                result.failed_auth += 1
+            case RetryPending(error):
+                logger.warning("Queue retry failed for %s: %s", entry.file_name, error)
+                await self._release_with_alert(
+                    telegram_app,
+                    config,
+                    entry,
+                    result,
+                    f"🛑 Queued upload stuck for “{entry.file_name}” — failed "
+                    "{attempts}x in a row. Check logs; it will keep retrying.",
+                )
 
     async def _release_with_alert(
         self,

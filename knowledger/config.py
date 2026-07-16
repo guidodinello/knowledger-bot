@@ -42,22 +42,56 @@ class LoggerConfig:
 
 
 @dataclass(frozen=True, slots=True)
-class Config:
-    logger: LoggerConfig
-    telegram_bot_token: str
-    claude_session_token: str
+class TelegramSettings:
+    bot_token: str
     allowed_user_ids: frozenset[int]
     project_whitelist: frozenset[str] = frozenset()
+
+
+@dataclass(frozen=True, slots=True)
+class ClaudeSettings:
+    session_token: str
+
+
+@dataclass(frozen=True, slots=True)
+class TranscriptSettings:
     proxy: ProxyConfig | None = None
     youtube_cookies_path: Path | None = None
-    token_update_secret: str | None = None
-    token_server_port: int | None = None
+
+
+@dataclass(frozen=True, slots=True)
+class TokenServerSettings:
+    port: int | None = None
+    secret: str | None = None
     personal_org_id: str | None = None
     cors_allowed_origin: str = "*"
+
+    def __post_init__(self) -> None:
+        if self.port is not None and self.secret is None:
+            raise ValueError("TOKEN_UPDATE_SECRET must be set when TOKEN_SERVER_PORT is configured")
+
+
+@dataclass(frozen=True, slots=True)
+class PollerSettings:
     auto_transcript_project: str | None = None
     channels_path: Path = field(default_factory=lambda: Path("channels.json"))
     poll_interval: int = 3600
+
+
+@dataclass(frozen=True, slots=True)
+class StorageSettings:
     data_dir: Path = field(default_factory=lambda: Path("."))
+
+
+@dataclass(frozen=True, slots=True)
+class Config:
+    telegram: TelegramSettings
+    claude: ClaudeSettings
+    logger: LoggerConfig
+    transcript: TranscriptSettings = field(default_factory=TranscriptSettings)
+    token_server: TokenServerSettings = field(default_factory=TokenServerSettings)
+    poller: PollerSettings = field(default_factory=PollerSettings)
+    storage: StorageSettings = field(default_factory=StorageSettings)
 
 
 def load_config() -> Config:
@@ -113,23 +147,31 @@ def load_config() -> Config:
     )
 
     return Config(
-        telegram_bot_token=token,
-        claude_session_token=session,
-        allowed_user_ids=allowed,
-        project_whitelist=frozenset(
-            name.strip() for name in raw_whitelist.split(",") if name.strip()
+        telegram=TelegramSettings(
+            bot_token=token,
+            allowed_user_ids=allowed,
+            project_whitelist=frozenset(
+                name.strip() for name in raw_whitelist.split(",") if name.strip()
+            ),
         ),
-        proxy=ProxyConfig(url=proxy_url) if proxy_url else None,
-        youtube_cookies_path=(
-            Path(raw_cookies) if (raw_cookies := os.getenv("YOUTUBE_COOKIES_PATH")) else None
+        claude=ClaudeSettings(session_token=session),
+        transcript=TranscriptSettings(
+            proxy=ProxyConfig(url=proxy_url) if proxy_url else None,
+            youtube_cookies_path=(
+                Path(raw_cookies) if (raw_cookies := os.getenv("YOUTUBE_COOKIES_PATH")) else None
+            ),
         ),
-        token_update_secret=os.getenv("TOKEN_UPDATE_SECRET") or None,
-        token_server_port=token_server_port,
-        personal_org_id=os.getenv("PERSONAL_ORG_ID") or None,
-        auto_transcript_project=os.getenv("AUTO_TRANSCRIPT_PROJECT") or None,
-        channels_path=Path(os.getenv("CHANNELS_PATH", "channels.json")),
-        poll_interval=poll_interval,
-        data_dir=data_dir,
-        cors_allowed_origin=os.getenv("CORS_ALLOWED_ORIGIN") or "*",
+        token_server=TokenServerSettings(
+            port=token_server_port,
+            secret=os.getenv("TOKEN_UPDATE_SECRET") or None,
+            personal_org_id=os.getenv("PERSONAL_ORG_ID") or None,
+            cors_allowed_origin=os.getenv("CORS_ALLOWED_ORIGIN") or "*",
+        ),
+        poller=PollerSettings(
+            auto_transcript_project=os.getenv("AUTO_TRANSCRIPT_PROJECT") or None,
+            channels_path=Path(os.getenv("CHANNELS_PATH", "channels.json")),
+            poll_interval=poll_interval,
+        ),
+        storage=StorageSettings(data_dir=data_dir),
         logger=logger_config,
     )

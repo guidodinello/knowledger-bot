@@ -1,10 +1,10 @@
 """Watch designated YouTube channels and auto-upload transcripts of new videos.
 
 Runs as an in-process asyncio task inside the bot (see ``main.py``). Every
-``config.poll_interval`` seconds it polls each channel's Atom feed, enqueues newly
-published videos, and once a video is 24h old fetches its transcript and uploads it as a
-doc into ``config.auto_transcript_project`` — reusing the manual flow's dedup + upload
-path (``ClaudeClient.list_docs`` / ``upload_content``) and the ``Queue`` auth-fallback.
+``config.poller.poll_interval`` seconds it polls each channel's Atom feed, enqueues
+newly published videos, and once a video is 24h old fetches its transcript and uploads
+it as a doc into ``config.poller.auto_transcript_project`` — reusing the shared
+``TranscriptUploadService`` and the ``Queue`` auth-fallback.
 """
 
 import asyncio
@@ -26,6 +26,13 @@ from .persistence import CorruptDataError, PersistenceError, atomic_write_json, 
 from .queue import Queue, QueueEntry
 from .queue_processor import MAX_UPLOAD_ATTEMPTS
 from .transcript import TranscriptTransportError, TranscriptUnavailable, fetch_transcript
+from .upload_service import (
+    AlreadyExists,
+    DeferredForAuth,
+    RetryPending,
+    TranscriptUploadService,
+    Uploaded,
+)
 from .youtube import build_doc_name
 
 logger = get_logger(__name__)
@@ -244,7 +251,7 @@ def _enqueue_auth_fallback(
         video_id=video.video_id,
         file_name=file_name,
         transcript=transcript,
-        chat_id=next(iter(config.allowed_user_ids), 0),
+        chat_id=next(iter(config.telegram.allowed_user_ids), 0),
         video_title=video.title,
         queued_at=datetime.now(UTC).isoformat(),
     )
@@ -253,144 +260,188 @@ def _enqueue_auth_fallback(
     queue.enqueue(entry)
 
 
-async def _process_video(
-    app: Application,
-    config: Config,
-    client: ClaudeClient,
-    queue: Queue,
-    project_id: str,
-    video: PendingVideo,
-    now: datetime,
-) -> PendingVideo | None:
-    """Fetch + upload one due video. Returns the (possibly updated) video to keep it in the
-    pending list, or None once it's done — confirmed uploaded, or permanently given up on."""
-    try:
-        transcript = await asyncio.to_thread(
-            fetch_transcript, video.video_id, config.proxy, config.youtube_cookies_path
-        )
-    except TranscriptUnavailable:
-        # Only an authoritative "no transcript" result may age into the give-up policy —
-        # a transient transport failure must stay retryable indefinitely, or a temporary
-        # block during the 72h window would get permanently misclassified as no captions.
-        first_seen = datetime.fromisoformat(video.first_seen)
-        if now - first_seen >= GIVE_UP_AFTER:
-            logger.info("Giving up on %s — no captions after %s", video.video_id, GIVE_UP_AFTER)
-            await notify(app, config, f"⚠️ No captions for “{video.title}” — gave up.")
-            return None
-        logger.info("Transcript not ready for %s; will retry", video.video_id)
-        return video
-    except TranscriptTransportError:
-        logger.info("Transcript request blocked for %s; will retry", video.video_id)
-        return video
+class TranscriptPoller:
+    """Holds the poller's stable dependencies for its whole run — replaces threading
+    app/config/client/queue/channels/state/project_name through every call as
+    positional arguments."""
 
-    file_name = build_doc_name(video.channel_name, video.title, video.published[:10])
+    def __init__(
+        self,
+        app: Application,
+        config: Config,
+        client: ClaudeClient,
+        queue: Queue,
+        channels: list[Channel],
+        state: PollerState,
+        project_name: str,
+    ) -> None:
+        self._app = app
+        self._config = config
+        self._client = client
+        self._queue = queue
+        self._service = TranscriptUploadService(client)
+        self._channels = channels
+        self._state = state
+        self._project_name = project_name
 
-    try:
-        docs = await asyncio.to_thread(client.list_docs, project_id)
-    except AuthError:
-        _enqueue_auth_fallback(queue, project_id, video, transcript, file_name, config)
-        await notify(app, config, f"Token expired — “{file_name}” queued. Run /refresh.")
-        return video  # keep pending until we confirm the upload landed
-
-    if any(d["file_name"] == file_name for d in docs):
-        logger.info("Doc already exists, skipping: %s", file_name)
-        queue.remove(project_id, video.video_id)
-        return None
-
-    try:
-        await asyncio.to_thread(client.upload_content, project_id, transcript, file_name)
-    except AuthError:
-        _enqueue_auth_fallback(queue, project_id, video, transcript, file_name, config)
-        await notify(app, config, f"Token expired — “{file_name}” queued. Run /refresh.")
-        return video
-    except Exception:
-        logger.exception("Upload failed for %s; will retry", file_name)
-        attempts = video.upload_attempts + 1
-        if attempts % MAX_UPLOAD_ATTEMPTS == 0:
-            await notify(
-                app,
-                config,
-                f"🛑 Upload stuck for “{file_name}” — failed {attempts}x in a row. "
-                "Check logs; it will keep retrying.",
-            )
-        return replace(video, upload_attempts=attempts)
-
-    logger.info("Auto-uploaded %s to project %s", file_name, project_id)
-    queue.remove(project_id, video.video_id)
-    await notify(app, config, f"✅ Auto-uploaded “{file_name}”")
-    return None
-
-
-async def _tick(
-    app: Application,
-    config: Config,
-    client: ClaudeClient,
-    queue: Queue,
-    channels: list[Channel],
-    state: PollerState,
-    project_name: str,
-) -> None:
-    # 1. Detect new videos across all channels.
-    for ch in channels:
-        if not ch.channel_id:
-            continue
+    async def _process_video(
+        self, project_id: str, video: PendingVideo, now: datetime
+    ) -> PendingVideo | None:
+        """Fetch + upload one due video. Returns the (possibly updated) video to keep
+        it in the pending list, or None once it's done — confirmed uploaded, or
+        permanently given up on."""
         try:
-            videos = await asyncio.to_thread(fetch_feed, ch.channel_id, config.proxy)
-        except Exception:
-            logger.warning("Feed fetch failed for %s; skipping this tick", ch.handle, exc_info=True)
-            continue
-        for video in videos:
-            if video.video_id not in state.seen:
-                state.seen.add(video.video_id)
-                state.pending.append(video)
-                logger.info("Detected new video %s (%s)", video.video_id, video.channel_name)
-    state.save()
-
-    if not state.pending:
-        return
-
-    # 2. Resolve the target project once per tick (cached on the client).
-    try:
-        project_id = await asyncio.to_thread(_resolve_project, client, project_name)
-    except AuthError:
-        logger.warning("Auth error resolving project; skipping processing this tick")
-        if not state.auth_error_notified:
-            state.auth_error_notified = True
-            await notify(
-                app,
-                config,
-                "⚠️ Claude session token expired — poller is paused. "
-                "Update the token (POST /update-token) to resume.",
+            transcript = await asyncio.to_thread(
+                fetch_transcript,
+                video.video_id,
+                self._config.transcript.proxy,
+                self._config.transcript.youtube_cookies_path,
             )
-        return
-    if state.auth_error_notified:
-        state.auth_error_notified = False
-        await notify(app, config, "✅ Claude session token restored — poller resumed.")
-    if project_id is None:
-        return
+        except TranscriptUnavailable:
+            # Only an authoritative "no transcript" result may age into the give-up
+            # policy — a transient transport failure must stay retryable indefinitely,
+            # or a temporary block during the 72h window would get permanently
+            # misclassified as no captions.
+            first_seen = datetime.fromisoformat(video.first_seen)
+            if now - first_seen >= GIVE_UP_AFTER:
+                logger.info("Giving up on %s — no captions after %s", video.video_id, GIVE_UP_AFTER)
+                await notify(
+                    self._app, self._config, f"⚠️ No captions for “{video.title}” — gave up."
+                )
+                return None
+            logger.info("Transcript not ready for %s; will retry", video.video_id)
+            return video
+        except TranscriptTransportError:
+            logger.info("Transcript request blocked for %s; will retry", video.video_id)
+            return video
 
-    # 3. Process every pending video whose publish time is at least UPLOAD_DELAY ago.
-    # Persist after each video so a crash/exception mid-batch can't discard already-confirmed
-    # progress on videos processed earlier in the same tick (state.pending is always the
-    # already-settled prefix plus the untouched remainder, never in-memory-only).
-    now = datetime.now(UTC)
-    original_pending = list(state.pending)
-    settled: list[PendingVideo] = []
-    for i, video in enumerate(original_pending):
-        if now - datetime.fromisoformat(video.published) < UPLOAD_DELAY:
-            settled.append(video)
-            continue
-        result = await _process_video(app, config, client, queue, project_id, video, now)
-        if result is not None:
-            settled.append(result)
-        state.pending = settled + original_pending[i + 1 :]
-        state.save()
-    state.pending = settled
-    state.save()
+        file_name = build_doc_name(video.channel_name, video.title, video.published[:10])
+
+        outcome = await asyncio.to_thread(self._service.upload, project_id, transcript, file_name)
+        match outcome:
+            case Uploaded():
+                logger.info("Auto-uploaded %s to project %s", file_name, project_id)
+                self._queue.remove(project_id, video.video_id)
+                await notify(self._app, self._config, f"✅ Auto-uploaded “{file_name}”")
+                return None
+            case AlreadyExists():
+                logger.info("Doc already exists, skipping: %s", file_name)
+                self._queue.remove(project_id, video.video_id)
+                return None
+            case DeferredForAuth():
+                _enqueue_auth_fallback(
+                    self._queue, project_id, video, transcript, file_name, self._config
+                )
+                await notify(
+                    self._app, self._config, f"Token expired — “{file_name}” queued. Run /refresh."
+                )
+                return video  # keep pending until we confirm the upload landed
+            case RetryPending(error):
+                # Covers both a failed doc listing and a failed upload — previously
+                # only upload failures counted toward the stuck-video alert; a
+                # transient listing failure silently retried unnoticed. Folding both
+                # into the same retry-classification closes that gap.
+                logger.warning("Upload attempt failed for %s: %s; will retry", file_name, error)
+                attempts = video.upload_attempts + 1
+                if attempts % MAX_UPLOAD_ATTEMPTS == 0:
+                    await notify(
+                        self._app,
+                        self._config,
+                        f"🛑 Upload stuck for “{file_name}” — failed {attempts}x in a row. "
+                        "Check logs; it will keep retrying.",
+                    )
+                return replace(video, upload_attempts=attempts)
+
+    async def _tick(self) -> None:
+        # 1. Detect new videos across all channels.
+        for ch in self._channels:
+            if not ch.channel_id:
+                continue
+            try:
+                videos = await asyncio.to_thread(
+                    fetch_feed, ch.channel_id, self._config.transcript.proxy
+                )
+            except Exception:
+                logger.warning(
+                    "Feed fetch failed for %s; skipping this tick", ch.handle, exc_info=True
+                )
+                continue
+            for video in videos:
+                if video.video_id not in self._state.seen:
+                    self._state.seen.add(video.video_id)
+                    self._state.pending.append(video)
+                    logger.info("Detected new video %s (%s)", video.video_id, video.channel_name)
+        self._state.save()
+
+        if not self._state.pending:
+            return
+
+        # 2. Resolve the target project once per tick (cached on the client).
+        try:
+            project_id = await asyncio.to_thread(_resolve_project, self._client, self._project_name)
+        except AuthError:
+            logger.warning("Auth error resolving project; skipping processing this tick")
+            if not self._state.auth_error_notified:
+                self._state.auth_error_notified = True
+                await notify(
+                    self._app,
+                    self._config,
+                    "⚠️ Claude session token expired — poller is paused. "
+                    "Update the token (POST /update-token) to resume.",
+                )
+            return
+        if self._state.auth_error_notified:
+            self._state.auth_error_notified = False
+            await notify(
+                self._app, self._config, "✅ Claude session token restored — poller resumed."
+            )
+        if project_id is None:
+            return
+
+        # 3. Process every pending video whose publish time is at least UPLOAD_DELAY
+        # ago. Persist after each video so a crash/exception mid-batch can't discard
+        # already-confirmed progress on videos processed earlier in the same tick
+        # (state.pending is always the already-settled prefix plus the untouched
+        # remainder, never in-memory-only).
+        now = datetime.now(UTC)
+        original_pending = list(self._state.pending)
+        settled: list[PendingVideo] = []
+        for i, video in enumerate(original_pending):
+            if now - datetime.fromisoformat(video.published) < UPLOAD_DELAY:
+                settled.append(video)
+                continue
+            result = await self._process_video(project_id, video, now)
+            if result is not None:
+                settled.append(result)
+            self._state.pending = settled + original_pending[i + 1 :]
+            self._state.save()
+        self._state.pending = settled
+        self._state.save()
+
+    async def run(self) -> None:
+        logger.info(
+            "Poller started: %d channel(s), interval %ds",
+            len(self._channels),
+            self._config.poller.poll_interval,
+        )
+        while True:
+            try:
+                await self._tick()
+            except asyncio.CancelledError:
+                raise
+            except PersistenceError:
+                # Fatal: state/queue can no longer be trusted. Let this propagate out
+                # of the poller task so structured supervision (see main.py)
+                # terminates the whole process visibly instead of continuing to run on
+                # unreliable persistence.
+                raise
+            except Exception:
+                logger.exception("Poller tick failed; continuing")
+            await asyncio.sleep(self._config.poller.poll_interval)
 
 
 async def run_poller(app: Application, config: Config) -> None:
-    project_name = config.auto_transcript_project
+    project_name = config.poller.auto_transcript_project
     if not project_name:
         logger.info("AUTO_TRANSCRIPT_PROJECT not set; poller disabled")
         return
@@ -398,32 +449,22 @@ async def run_poller(app: Application, config: Config) -> None:
     client: ClaudeClient = app.bot_data["claude_client"]
     queue: Queue = app.bot_data["queue"]
 
-    channels = load_channels(config.channels_path)
+    channels = load_channels(config.poller.channels_path)
     if not channels:
-        logger.warning("No channels configured (%s); poller idle", config.channels_path)
+        logger.warning("No channels configured (%s); poller idle", config.poller.channels_path)
         return
 
-    await asyncio.to_thread(_resolve_missing_ids, channels, config.channels_path, config.proxy)
+    await asyncio.to_thread(
+        _resolve_missing_ids, channels, config.poller.channels_path, config.transcript.proxy
+    )
 
-    config.data_dir.mkdir(parents=True, exist_ok=True)
-    state_path = config.data_dir / "poller_state.json"
+    config.storage.data_dir.mkdir(parents=True, exist_ok=True)
+    state_path = config.storage.data_dir / "poller_state.json"
     first_run = not state_path.exists()
     state = PollerState.load(state_path)
     if first_run:
-        await asyncio.to_thread(_baseline_seed, channels, state, config.proxy)
+        await asyncio.to_thread(_baseline_seed, channels, state, config.transcript.proxy)
         state.save()
 
-    logger.info("Poller started: %d channel(s), interval %ds", len(channels), config.poll_interval)
-    while True:
-        try:
-            await _tick(app, config, client, queue, channels, state, project_name)
-        except asyncio.CancelledError:
-            raise
-        except PersistenceError:
-            # Fatal: state/queue can no longer be trusted. Let this propagate out of the
-            # poller task so structured supervision (see main.py) terminates the whole
-            # process visibly instead of continuing to run on unreliable persistence.
-            raise
-        except Exception:
-            logger.exception("Poller tick failed; continuing")
-        await asyncio.sleep(config.poll_interval)
+    poller = TranscriptPoller(app, config, client, queue, channels, state, project_name)
+    await poller.run()

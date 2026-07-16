@@ -9,6 +9,13 @@ from dotenv import load_dotenv
 
 from knowledger.claude_client import AuthError, ClaudeClient
 from knowledger.transcript import TranscriptTransportError, TranscriptUnavailable, fetch_transcript
+from knowledger.upload_service import (
+    AlreadyExists,
+    DeferredForAuth,
+    RetryPending,
+    TranscriptUploadService,
+    Uploaded,
+)
 from knowledger.youtube import build_doc_name, extract_video_id, fetch_video_metadata
 
 
@@ -113,16 +120,20 @@ def main() -> None:
     file_name = build_doc_name(metadata.channel_name, metadata.title, metadata.upload_date)
 
     print(f"Uploading to '{project_name}'...")
-    try:
-        client.upload_content(project_id, transcript, file_name)
-    except AuthError as e:
-        print(f"Auth error: {e}", file=sys.stderr)
-        sys.exit(1)
-    except Exception as e:
-        print(f"Upload failed: {e}", file=sys.stderr)
-        sys.exit(1)
-
-    print(f"Done. Saved as '{file_name}'.")
+    service = TranscriptUploadService(client)
+    outcome = service.upload(project_id, transcript, file_name)
+    match outcome:
+        case Uploaded():
+            print(f"Done. Saved as '{file_name}'.")
+        case AlreadyExists():
+            print(f"'{file_name}' already exists in this project — nothing uploaded.")
+            sys.exit(1)
+        case DeferredForAuth(error):
+            print(f"Auth error: {error}", file=sys.stderr)
+            sys.exit(1)
+        case RetryPending(error):
+            print(f"Upload failed: {error}", file=sys.stderr)
+            sys.exit(1)
 
 
 if __name__ == "__main__":

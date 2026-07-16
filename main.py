@@ -20,8 +20,8 @@ async def _run_polling(app) -> None:
 async def main_async(config: Config) -> None:
     logger = get_logger(__name__)
     logger.info("Starting knowledger bot")
-    if config.token_server_port is not None and config.token_update_secret is None:
-        raise ValueError("TOKEN_UPDATE_SECRET must be set when TOKEN_SERVER_PORT is configured")
+    # config.token_server's secret-requires-port invariant is validated at construction
+    # time (TokenServerSettings.__post_init__), not here.
 
     app = build_application(config)
 
@@ -29,25 +29,21 @@ async def main_async(config: Config) -> None:
         async with asyncio.TaskGroup() as tg:
             tasks = [tg.create_task(_run_polling(app))]
 
-            if config.auto_transcript_project is not None:
+            if config.poller.auto_transcript_project is not None:
                 from knowledger.poller import run_poller
 
                 tasks.append(tg.create_task(run_poller(app, config)))
 
-            if config.token_server_port is not None:
+            if config.token_server.port is not None:
                 from knowledger.http_server import build_aiohttp_app, run_http_server
 
-                assert config.token_update_secret is not None  # validated above
                 aiohttp_app = build_aiohttp_app(
                     client=app.bot_data["claude_client"],
                     processor=app.bot_data["queue_processor"],
                     telegram_app=app,
                     config=config,
-                    secret=config.token_update_secret,
-                    personal_org_id=config.personal_org_id,
-                    cors_allowed_origin=config.cors_allowed_origin,
                 )
-                tasks.append(tg.create_task(run_http_server(aiohttp_app, config.token_server_port)))
+                tasks.append(tg.create_task(run_http_server(aiohttp_app, config.token_server.port)))
 
             loop = asyncio.get_running_loop()
 

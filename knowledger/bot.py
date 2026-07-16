@@ -1,10 +1,11 @@
 import asyncio
+from collections.abc import Callable, Coroutine
 from datetime import UTC, datetime
 from functools import wraps
 from typing import Any, TypedDict
 
 from curl_cffi.requests.exceptions import RequestException
-from telegram import InlineKeyboardButton, InlineKeyboardMarkup, Update
+from telegram import InlineKeyboardButton, InlineKeyboardMarkup, Update, User
 from telegram.ext import (
     Application,
     CallbackContext,
@@ -23,6 +24,13 @@ from .persistence import PersistenceError
 from .queue import Queue, QueueEntry
 from .queue_processor import DrainResult, QueueProcessor
 from .transcript import TranscriptTransportError, TranscriptUnavailable, fetch_transcript
+from .upload_service import (
+    AlreadyExists,
+    DeferredForAuth,
+    RetryPending,
+    TranscriptUploadService,
+    Uploaded,
+)
 from .youtube import VideoMetadata, build_doc_name, extract_video_id, fetch_video_metadata
 
 logger = get_logger(__name__)
@@ -46,48 +54,67 @@ CustomContext = CallbackContext[Any, dict, dict, BotData]
 YOUTUBE_URL_PATTERN = r"https?://(www\.)?(youtube\.com/watch|youtu\.be/|youtube\.com/shorts/)\S+"
 
 
+def _keyboard_for(projects: list[Project], msg_id: int | str) -> InlineKeyboardMarkup:
+    """Every project, no "More..." row — used once the user has asked to see the full
+    list, or when no whitelist is configured at all."""
+    keyboard = [
+        [InlineKeyboardButton(p["name"], callback_data=f"{p['uuid']}:{msg_id}")] for p in projects
+    ]
+    return InlineKeyboardMarkup(keyboard)
+
+
 def _build_keyboard(
-    projects: list[Project],
-    msg_id: int | str,
-    whitelist: frozenset[str],
-    show_all: bool = False,
+    projects: list[Project], msg_id: int | str, whitelist: frozenset[str]
 ) -> InlineKeyboardMarkup:
-    if whitelist and not show_all:
-        visible = [p for p in projects if p["name"] in whitelist]
-        has_more = len(visible) < len(projects)
-    else:
-        visible = projects
-        has_more = False
+    """Whitelist-filtered view, with a "More..." row when it hides any project — the
+    caller wanting the unfiltered list uses `_keyboard_for` directly instead of passing
+    an empty whitelist here."""
+    if not whitelist:
+        return _keyboard_for(projects, msg_id)
+    visible = [p for p in projects if p["name"] in whitelist]
     keyboard = [
         [InlineKeyboardButton(p["name"], callback_data=f"{p['uuid']}:{msg_id}")] for p in visible
     ]
-    if has_more:
+    if len(visible) < len(projects):
         keyboard.append([InlineKeyboardButton("More...", callback_data=f"more:{msg_id}")])
     return InlineKeyboardMarkup(keyboard)
 
 
-def _is_allowed(update: Update, config: Config) -> bool:
+def _authenticated_user(update: Update, config: Config) -> User | None:
     user = update.effective_user
-    if user is None or user.id not in config.allowed_user_ids:
+    if user is None or user.id not in config.telegram.allowed_user_ids:
         logger.warning("Unauthorized access attempt from user %s", user)
-        return False
-    return True
+        return None
+    return user
 
 
-def _require_auth(handler):
+_AuthedHandler = Callable[[Update, CustomContext, User], Coroutine[Any, Any, None]]
+_Handler = Callable[[Update, CustomContext], Coroutine[Any, Any, None]]
+
+
+def _require_auth(handler: _AuthedHandler) -> _Handler:
+    """Wraps a handler so it only ever runs for an allowed user, and passes that user
+    to the handler explicitly (rather than leaving it to re-derive `update.effective_user`
+    as `User | None`, which is always non-None at that point but not statically so).
+
+    Explicitly typed (rather than left for inference) so callers — both python-telegram-bot's
+    handler registration and direct calls like cmd_help -> cmd_start — see the wrapped
+    two-argument signature, not the inner handler's three-argument one."""
+
     @wraps(handler)
-    async def wrapper(update: Update, context: CustomContext):
-        if not _is_allowed(update, context.bot_data["config"]):
+    async def wrapper(update: Update, context: CustomContext) -> None:
+        user = _authenticated_user(update, context.bot_data["config"])
+        if user is None:
             if update.callback_query:
                 await update.callback_query.answer("Access denied.")
             return
-        return await handler(update, context)
+        await handler(update, context, user)
 
     return wrapper
 
 
 @_require_auth
-async def cmd_start(update: Update, context: CustomContext) -> None:
+async def cmd_start(update: Update, context: CustomContext, user: User) -> None:
     if update.message is None:
         return
     await update.message.reply_text(
@@ -97,12 +124,12 @@ async def cmd_start(update: Update, context: CustomContext) -> None:
 
 
 @_require_auth
-async def cmd_help(update: Update, context: CustomContext) -> None:
+async def cmd_help(update: Update, context: CustomContext, user: User) -> None:
     await cmd_start(update, context)
 
 
 @_require_auth
-async def cmd_refresh(update: Update, context: CustomContext) -> None:
+async def cmd_refresh(update: Update, context: CustomContext, user: User) -> None:
     if update.message is None:
         return
     await update.message.reply_text("Refreshing project list...")
@@ -155,7 +182,7 @@ async def drain_queue(
 
 
 @_require_auth
-async def handle_youtube_url(update: Update, context: CustomContext) -> None:
+async def handle_youtube_url(update: Update, context: CustomContext, user: User) -> None:
     if update.message is None or update.message.text is None or context.user_data is None:
         return
 
@@ -164,12 +191,12 @@ async def handle_youtube_url(update: Update, context: CustomContext) -> None:
         await update.message.reply_text("Couldn't parse a video ID from that URL.")
         return
 
-    logger.info("New request from user %s: %s", update.effective_user.id, url)
+    logger.info("New request from user %s: %s", user.id, url)
     await update.message.reply_text("Fetching video info...")
 
     try:
         metadata = await asyncio.to_thread(
-            fetch_video_metadata, url, context.bot_data["config"].proxy
+            fetch_video_metadata, url, context.bot_data["config"].transcript.proxy
         )
     except (RequestException, ValueError) as e:
         logger.exception("Failed to fetch metadata for %s", url)
@@ -190,7 +217,9 @@ async def handle_youtube_url(update: Update, context: CustomContext) -> None:
     msg_id = update.message.message_id
     context.user_data[f"video_{msg_id}"] = metadata
 
-    keyboard = _build_keyboard(projects, msg_id, context.bot_data["config"].project_whitelist)
+    keyboard = _build_keyboard(
+        projects, msg_id, context.bot_data["config"].telegram.project_whitelist
+    )
 
     safe_title = escape_markdown(metadata.title, version=1)
     safe_channel = escape_markdown(metadata.channel_name, version=1)
@@ -202,7 +231,7 @@ async def handle_youtube_url(update: Update, context: CustomContext) -> None:
 
 
 @_require_auth
-async def handle_project_selection(update: Update, context: CustomContext) -> None:
+async def handle_project_selection(update: Update, context: CustomContext, user: User) -> None:
     query = update.callback_query
     if query is None or context.user_data is None:
         return
@@ -225,7 +254,7 @@ async def handle_project_selection(update: Update, context: CustomContext) -> No
             except AuthError as e:
                 await query.answer(str(e)[:200])
                 return
-            keyboard = _build_keyboard(projects, msg_id_str, frozenset(), show_all=True)
+            keyboard = _keyboard_for(projects, msg_id_str)
             await query.edit_message_reply_markup(reply_markup=keyboard)
             return
 
@@ -281,8 +310,8 @@ async def handle_project_selection(update: Update, context: CustomContext) -> No
         transcript = await asyncio.to_thread(
             fetch_transcript,
             metadata.video_id,
-            proxy=context.bot_data["config"].proxy,
-            cookies_path=context.bot_data["config"].youtube_cookies_path,
+            proxy=context.bot_data["config"].transcript.proxy,
+            cookies_path=context.bot_data["config"].transcript.youtube_cookies_path,
         )
     except TranscriptUnavailable:
         await query.edit_message_text(
@@ -297,52 +326,62 @@ async def handle_project_selection(update: Update, context: CustomContext) -> No
         return
 
     logger.info("Uploading %s to project %s", file_name, project_id)
-    try:
-        await asyncio.to_thread(
-            context.bot_data["claude_client"].upload_content, project_id, transcript, file_name
-        )
-    except AuthError:
-        if update.effective_chat is None:
-            return
-        entry = QueueEntry(
-            project_id=project_id,
-            video_id=metadata.video_id,
-            file_name=file_name,
-            transcript=transcript,
-            chat_id=update.effective_chat.id,
-            video_title=metadata.title,
-            queued_at=datetime.now(UTC).isoformat(),
-        )
-        try:
-            added = context.bot_data["queue"].enqueue(entry)
-        except Exception:
-            logger.exception("Failed to enqueue %s", file_name)
+    service = TranscriptUploadService(context.bot_data["claude_client"])
+    # `docs` was just fetched above (for the duplicate check) and no upload happens
+    # here unless that check found nothing — reuse it instead of listing again.
+    outcome = await asyncio.to_thread(service.upload, project_id, transcript, file_name, docs=docs)
+
+    match outcome:
+        case Uploaded():
+            context.user_data.pop(f"video_{msg_id_str}", None)
+            logger.info("Upload complete: %s -> project %s", file_name, project_id)
             await query.edit_message_text(
-                "Token expired and queuing failed — please resend the URL after updating the token."
+                f"Saved *{escape_markdown(file_name, version=1)}* to project.",
+                parse_mode="Markdown",
             )
-            return
-        escaped = escape_markdown(file_name, version=1)
-        if added:
-            msg = f"Token expired — *{escaped}* queued. Run /refresh after updating the token."
-        else:
-            msg = f"Token expired — *{escaped}* was already queued."
-        await query.edit_message_text(msg, parse_mode="Markdown")
-        return
-    except Exception as e:
-        logger.exception("Upload failed for %s", file_name)
-        await query.edit_message_text(f"Upload failed: {e}")
-        return
-
-    context.user_data.pop(f"video_{msg_id_str}", None)
-
-    logger.info("Upload complete: %s -> project %s", file_name, project_id)
-    await query.edit_message_text(
-        f"Saved *{escape_markdown(file_name, version=1)}* to project.", parse_mode="Markdown"
-    )
+        case AlreadyExists():
+            # Rare race: a doc with this name appeared between the check above and
+            # this upload attempt. Same "nothing to do" outcome as the check finding
+            # it up front.
+            await query.edit_message_text(
+                f"*{escape_markdown(file_name, version=1)}* already exists in this "
+                "project — nothing uploaded.",
+                parse_mode="Markdown",
+            )
+        case DeferredForAuth():
+            if update.effective_chat is None:
+                return
+            entry = QueueEntry(
+                project_id=project_id,
+                video_id=metadata.video_id,
+                file_name=file_name,
+                transcript=transcript,
+                chat_id=update.effective_chat.id,
+                video_title=metadata.title,
+                queued_at=datetime.now(UTC).isoformat(),
+            )
+            try:
+                added = context.bot_data["queue"].enqueue(entry)
+            except PersistenceError:
+                logger.exception("Failed to enqueue %s", file_name)
+                await query.edit_message_text(
+                    "Token expired and queuing failed — please resend the URL after "
+                    "updating the token."
+                )
+                return
+            escaped = escape_markdown(file_name, version=1)
+            if added:
+                msg = f"Token expired — *{escaped}* queued. Run /refresh after updating the token."
+            else:
+                msg = f"Token expired — *{escaped}* was already queued."
+            await query.edit_message_text(msg, parse_mode="Markdown")
+        case RetryPending(error):
+            logger.warning("Upload failed for %s: %s", file_name, error)
+            await query.edit_message_text(f"Upload failed: {error}")
 
 
 @_require_auth
-async def handle_duplicate_choice(update: Update, context: CustomContext) -> None:
+async def handle_duplicate_choice(update: Update, context: CustomContext, user: User) -> None:
     query = update.callback_query
     if query is None or context.user_data is None:
         return
@@ -379,8 +418,8 @@ async def handle_duplicate_choice(update: Update, context: CustomContext) -> Non
         transcript = await asyncio.to_thread(
             fetch_transcript,
             pending["video_id"],
-            proxy=context.bot_data["config"].proxy,
-            cookies_path=context.bot_data["config"].youtube_cookies_path,
+            proxy=context.bot_data["config"].transcript.proxy,
+            cookies_path=context.bot_data["config"].transcript.youtube_cookies_path,
         )
     except TranscriptUnavailable:
         await query.edit_message_text(
@@ -442,66 +481,41 @@ async def handle_duplicate_choice(update: Update, context: CustomContext) -> Non
     logger.info("Overwriting %s in project %s", pending["file_name"], pending["project_id"])
     await query.edit_message_text("Overwriting...")
 
-    client = context.bot_data["claude_client"]
+    service = TranscriptUploadService(context.bot_data["claude_client"])
     try:
-        try:
-            docs: list[Doc] = await asyncio.to_thread(client.list_docs, claimed.project_id)
-        except AuthError as e:
-            queue.release(claimed.id)
-            await query.edit_message_text(f"Auth error — overwrite queued for retry: {e}")
-            return
-        except RequestException as e:
-            queue.release(claimed.id, increment_attempts=True)
-            await query.edit_message_text(
-                f"Failed to check project docs: {e}. Will retry automatically."
-            )
-            return
-
-        if any(d["uuid"] == doc_uuid for d in docs):
-            try:
-                await asyncio.to_thread(client.delete_doc, claimed.project_id, doc_uuid)
-            except AuthError as e:
+        outcome = await asyncio.to_thread(
+            service.upload,
+            claimed.project_id,
+            claimed.transcript,
+            claimed.file_name,
+            overwrite_doc_uuid=doc_uuid,
+        )
+        match outcome:
+            case Uploaded():
+                queue.ack(claimed.id)
+                logger.info(
+                    "Overwrite complete: %s -> project %s",
+                    pending["file_name"],
+                    pending["project_id"],
+                )
+                await query.edit_message_text(
+                    f"Saved *{escaped}* to project.", parse_mode="Markdown"
+                )
+            case AlreadyExists():
+                # Old doc already gone and a replacement already exists: a prior
+                # attempt landed and we just never saw the confirmation.
+                queue.ack(claimed.id)
+                await query.edit_message_text(
+                    f"*{escaped}* was already overwritten.", parse_mode="Markdown"
+                )
+            case DeferredForAuth(error):
                 queue.release(claimed.id)
-                await query.edit_message_text(f"Auth error — overwrite queued for retry: {e}")
-                return
-            except RequestException as e:
+                await query.edit_message_text(f"Auth error — overwrite queued for retry: {error}")
+            case RetryPending(error):
                 queue.release(claimed.id, increment_attempts=True)
                 await query.edit_message_text(
-                    f"Failed to delete the old doc: {e}. Will retry automatically."
+                    f"Overwrite failed: {error}. It has been queued and will retry automatically."
                 )
-                return
-        elif any(d["file_name"] == claimed.file_name for d in docs):
-            # Old doc already gone and a replacement already exists: a prior attempt
-            # landed and we just never saw the confirmation. Don't upload a duplicate.
-            queue.ack(claimed.id)
-            await query.edit_message_text(
-                f"*{escaped}* was already overwritten.", parse_mode="Markdown"
-            )
-            return
-
-        try:
-            await asyncio.to_thread(
-                client.upload_content, claimed.project_id, claimed.transcript, claimed.file_name
-            )
-        except AuthError as e:
-            queue.release(claimed.id)
-            await query.edit_message_text(
-                f"Auth error — old doc deleted, replacement queued for retry: {e}"
-            )
-            return
-        except RequestException as e:
-            queue.release(claimed.id, increment_attempts=True)
-            await query.edit_message_text(
-                f"Old doc deleted but the replacement upload failed: {e}. "
-                "It has been queued and will retry automatically."
-            )
-            return
-
-        queue.ack(claimed.id)
-        logger.info(
-            "Overwrite complete: %s -> project %s", pending["file_name"], pending["project_id"]
-        )
-        await query.edit_message_text(f"Saved *{escaped}* to project.", parse_mode="Markdown")
     except Exception:
         # Anything unexpected (a programming error, a malformed API response) must
         # still release the claim — otherwise the entry is stuck in_flight until the
@@ -523,15 +537,15 @@ async def handle_duplicate_choice(update: Update, context: CustomContext) -> Non
 def build_application(config: Config) -> Application:
     app = (
         Application.builder()
-        .token(config.telegram_bot_token)
+        .token(config.telegram.bot_token)
         .context_types(ContextTypes(bot_data=BotData))
         .build()
     )
     app.bot_data["config"] = config
     app.bot_data["claude_client"] = ClaudeClient(
-        config.claude_session_token, persist_path=config.data_dir / "session_token.json"
+        config.claude.session_token, persist_path=config.storage.data_dir / "session_token.json"
     )
-    queue = Queue(path=config.data_dir / "petition_queue.json")
+    queue = Queue(path=config.storage.data_dir / "petition_queue.json")
     recovered = queue.recover_abandoned()
     if recovered:
         logger.warning(

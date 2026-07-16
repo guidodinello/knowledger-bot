@@ -6,7 +6,7 @@ from aiohttp.web_middlewares import middleware
 from telegram.ext import Application
 
 from .claude_client import AuthError, ClaudeClient, get_org_id_for_token
-from .config import Config
+from .config import Config, TokenServerSettings
 from .logger import get_logger
 from .queue_processor import QueueProcessor
 
@@ -41,9 +41,8 @@ async def _await_background_tasks(app: web.Application) -> None:
 
 
 async def _handle_update_token(request: web.Request) -> web.Response:
-    secret: str = request.app["token_update_secret"]
+    settings: TokenServerSettings = request.app["settings"]
     client: ClaudeClient = request.app["claude_client"]
-    personal_org_id: str | None = request.app["personal_org_id"]
 
     try:
         body = await request.json()
@@ -54,7 +53,9 @@ async def _handle_update_token(request: web.Request) -> web.Response:
         return web.json_response({"error": "JSON body must be an object"}, status=400)
 
     raw_secret = body.get("secret")
-    if not isinstance(raw_secret, str) or not hmac.compare_digest(raw_secret, secret):
+    if not isinstance(raw_secret, str) or not hmac.compare_digest(
+        raw_secret, settings.secret or ""
+    ):
         return web.json_response({"error": "forbidden"}, status=403)
 
     raw_token = body.get("token")
@@ -62,7 +63,7 @@ async def _handle_update_token(request: web.Request) -> web.Response:
         return web.json_response({"error": "'token' must be a non-empty string"}, status=400)
     new_token = raw_token.strip()
 
-    if personal_org_id is not None:
+    if settings.personal_org_id is not None:
         try:
             org_id = await asyncio.to_thread(get_org_id_for_token, new_token)
         except AuthError:
@@ -70,8 +71,10 @@ async def _handle_update_token(request: web.Request) -> web.Response:
         except Exception:
             logger.exception("Org validation error")
             return web.json_response({"error": "validation failed"}, status=500)
-        if org_id != personal_org_id:
-            logger.warning("Rejected token for org %s (expected %s)", org_id, personal_org_id)
+        if org_id != settings.personal_org_id:
+            logger.warning(
+                "Rejected token for org %s (expected %s)", org_id, settings.personal_org_id
+            )
             return web.json_response({"error": "token belongs to wrong account"}, status=403)
 
     try:
@@ -112,17 +115,18 @@ def build_aiohttp_app(
     processor: QueueProcessor,
     telegram_app: Application,
     config: Config,
-    secret: str,
-    personal_org_id: str | None,
-    cors_allowed_origin: str = "*",
 ) -> web.Application:
-    app = web.Application(middlewares=[_make_cors_middleware(cors_allowed_origin)])
+    """Takes the single `config` as its source of truth for token-server settings
+    (secret, personal_org_id, CORS origin) instead of also unpacking those same
+    values as separate parameters."""
+    app = web.Application(
+        middlewares=[_make_cors_middleware(config.token_server.cors_allowed_origin)]
+    )
     app["claude_client"] = client
     app["queue_processor"] = processor
     app["telegram_app"] = telegram_app
     app["config"] = config
-    app["token_update_secret"] = secret
-    app["personal_org_id"] = personal_org_id
+    app["settings"] = config.token_server
     app["background_tasks"] = set()
     app.on_cleanup.append(_await_background_tasks)
     app.router.add_post("/update-token", _handle_update_token)

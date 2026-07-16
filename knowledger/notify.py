@@ -7,7 +7,7 @@ logger = get_logger(__name__)
 
 
 async def notify(app: Application, config: Config, text: str) -> None:
-    for uid in config.allowed_user_ids:
+    for uid in config.telegram.allowed_user_ids:
         try:
             await app.bot.send_message(chat_id=uid, text=text)
         except Exception:
