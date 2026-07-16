@@ -188,6 +188,9 @@ async def drain_queue(
     return await proc.drain(telegram_app, config, client)
 
 
+_TELEGRAM_MAX_MESSAGE_LENGTH = 4096
+
+
 @_require_auth
 async def cmd_inqueue(update: Update, context: CustomContext, user: User) -> None:
     if update.message is None:
@@ -213,22 +216,27 @@ async def cmd_inqueue(update: Update, context: CustomContext, user: User) -> Non
     lines.append("poller_state.json (seen + pending videos)")
     try:
         state = PollerState.load(state_path)
-    except Exception as e:
+    except PersistenceError as e:
         logger.exception("Failed to read poller state")
-        lines.append(f"(error: {e})")
+        lines.append(f"(error: {escape_markdown(str(e), version=1)})")
     else:
         if state.pending:
             lines.append(f"pending: {len(state.pending)}")
             for v in state.pending:
                 title = escape_markdown(v.title, version=1)
+                channel_name = escape_markdown(v.channel_name, version=1)
                 attempts = f" — attempts: {v.upload_attempts}" if v.upload_attempts else ""
-                lines.append(f"• {title} — {v.channel_name}{attempts}")
+                lines.append(f"• {title} — {channel_name}{attempts}")
         else:
             lines.append("(no pending videos)")
         if state.seen:
             lines.append(f"seen: {len(state.seen)} videos total")
 
-    await update.message.reply_text("\n".join(lines), parse_mode="Markdown")
+    text = "\n".join(lines)
+    if len(text) > _TELEGRAM_MAX_MESSAGE_LENGTH:
+        truncated_note = "\n… (truncated)"
+        text = text[: _TELEGRAM_MAX_MESSAGE_LENGTH - len(truncated_note)] + truncated_note
+    await update.message.reply_text(text, parse_mode="Markdown")
 
 
 @_require_auth
