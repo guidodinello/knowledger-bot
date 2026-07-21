@@ -56,6 +56,14 @@ except TranscriptTransportError:
 The bot's interactive flow has no equivalent "pending" concept — a Telegram callback
 handler is fire-and-forget with no next tick to retry on.
 
+Note this is specifically about the *transcript* fetch inside a user-triggered
+request. The poller's *feed* fetches (`fetch_feed`/`_http_get` in `poller.py`, which
+also failed with a run of 404s during the same investigation) don't need an
+equivalent fix: `TranscriptPoller.run()` (poller.py:444-463) is an infinite loop that
+re-fetches every channel's feed on every tick regardless of the previous tick's
+outcome, so a feed failure is already retried automatically `poll_interval` seconds
+later — no queue required there.
+
 ## Impact
 
 Medium. Confirmed to happen in production (two videos back-to-back on 2026-07-21,
