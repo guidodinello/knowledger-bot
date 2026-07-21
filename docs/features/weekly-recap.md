@@ -102,6 +102,7 @@ async def run_weekly_recap(app: Application, config: Config) -> None:
 ```
 
 `_send_recap`:
+
 1. `load_history(config.storage.data_dir)`, filter to `uploaded_at >= now - 7 days`.
 2. Resolve each `project_id` to a display name via `client.list_projects()` (already
    cached — no extra API cost beyond whatever's already cached this run). A
