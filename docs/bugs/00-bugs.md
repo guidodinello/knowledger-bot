@@ -1,5 +1,7 @@
 # Bug Audit
 
+## Fixed
+
 Six bugs found across the codebase, ranging from a user-visible message failure to silent data quality issues.
 
 | # | Severity | File | Status | Summary |
@@ -10,3 +12,11 @@ Six bugs found across the codebase, ranging from a user-visible message failure 
 | 4 | Low | `knowledger/logger.py` | ✅ Fixed | [LOG_LEVEL from .env is silently ignored](log-level-ignored.md) |
 | 5 | Low | `knowledger/bot.py` | ✅ Fixed | [/refresh drops non-auth network errors](refresh-error-handling.md) |
 | 6 | Low | `knowledger/invidious.py` | ✅ Fixed | [VTT cue sequence numbers bleed into transcript](vtt-cue-numbers-in-transcript.md) |
+
+## Open
+
+| # | Severity | File | Status | Summary |
+|---|----------|------|--------|---------|
+| 7 | Low | `knowledger/bot.py` | ⬜ Open | [/inqueue filenames break Markdown rendering](inqueue-markdown-italics.md) |
+| 8 | Medium | `knowledger/bot.py`, `knowledger/claude_client.py` | ⬜ Open | [Auth errors before project selection skip the retry queue entirely](petition-queue-missing-project-context.md) |
+| 9 | Medium | `knowledger/bot.py` | ⬜ Open | [Blocked transcript fetches are silently dropped, not retried](transcript-blocked-not-queued.md) |
