@@ -20,5 +20,5 @@ Six bugs found across the codebase, ranging from a user-visible message failure 
 | # | Severity | File | Status | Summary |
 |---|----------|------|--------|---------|
 | 7 | Low | `knowledger/bot.py` | ⬜ Open | [/inqueue filenames break Markdown rendering](inqueue-markdown-italics.md) |
-| 8 | Medium | `knowledger/bot.py`, `knowledger/claude_client.py` | 🔧 In review | [Auth errors before project selection skip the retry queue entirely](petition-queue-missing-project-context.md) |
+| 8 | Medium | `knowledger/bot.py`, `knowledger/claude_client.py` | 🔧 [In review](https://github.com/guidodinello/knowledger-bot/pull/44) | [Auth errors before project selection skip the retry queue entirely](petition-queue-missing-project-context.md) |
 | 9 | Medium | `knowledger/bot.py` | 🔧 [In review](https://github.com/guidodinello/knowledger-bot/pull/45) | [Blocked transcript fetches are silently dropped, not retried](transcript-blocked-not-queued.md) |
