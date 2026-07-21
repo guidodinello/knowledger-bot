@@ -1,5 +1,7 @@
 # Feature Proposals
 
+**Status legend:** ⬜ Proposed (unclaimed) · 🔧 In review (PR open, link in this table) · ✅ Implemented (merged)
+
 ## Implemented
 
 | Feature | Summary |
@@ -12,9 +14,9 @@
 
 ## Proposed / Not yet implemented
 
-| Feature | Summary |
-|-------|---------|
-| [Instagram Reel support](instagram-reel-support.md) | Extend `scripts/transcribe.py` (offline, manual) to download Instagram Reels via yt-dlp cookies auth and transcribe with faster-whisper. Feasibility: low-effort but manual-only — no caption API, no bot/poller integration. |
-| [Redesign `/inqueue` output for readability](inqueue-redesign.md) | Reformats the queue listing (grouping, timestamps, escaping) so it's actually readable instead of a wall of raw filenames |
-| [Per-channel Claude project + baseline seeding](per-channel-project-and-baseline-seed.md) | Lets each watched YouTube channel target its own Claude project (investments vs. exercise, etc.) instead of one global project, and seeds new channels without flooding their back-catalogue |
-| [Weekly upload recap](weekly-recap.md) | Sunday summary of what the poller auto-transcribed and uploaded that week, per project |
+| Feature | Status | Summary |
+|---------|--------|---------|
+| [Instagram Reel support](instagram-reel-support.md) | ⬜ Proposed | Extend `scripts/transcribe.py` (offline, manual) to download Instagram Reels via yt-dlp cookies auth and transcribe with faster-whisper. Feasibility: low-effort but manual-only — no caption API, no bot/poller integration. |
+| [Redesign `/inqueue` output for readability](inqueue-redesign.md) | ⬜ Proposed | Reformats the queue listing (grouping, timestamps, escaping) so it's actually readable instead of a wall of raw filenames |
+| [Per-channel Claude project + baseline seeding](per-channel-project-and-baseline-seed.md) | ⬜ Proposed | Lets each watched YouTube channel target its own Claude project (investments vs. exercise, etc.) instead of one global project, and seeds new channels without flooding their back-catalogue |
+| [Weekly upload recap](weekly-recap.md) | ⬜ Proposed | Sunday summary of what the poller auto-transcribed and uploaded that week, per project |

@@ -1,5 +1,7 @@
 # Bug Audit
 
+**Status legend:** ⬜ Open (unclaimed) · 🔧 In review (PR open, link in this table) · ✅ Fixed (merged)
+
 ## Fixed
 
 Six bugs found across the codebase, ranging from a user-visible message failure to silent data quality issues.
