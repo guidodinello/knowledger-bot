@@ -83,6 +83,16 @@ drains by retrying `fetch_transcript` and, on success, falling into the same
 `service.upload()` + `QueueEntry`-on-`DeferredForAuth` logic already in
 `handle_project_selection`. Mirrors the poller's proven pattern exactly.
 
+The drain should call `service.upload()` bare (no pre-fetched `docs`, no
+`overwrite_doc_uuid`) rather than reconstruct the interactive Skip/Overwrite prompt —
+there's no user actively waiting on a callback for a background retry. If the video
+landed in the project some other way while the retry was pending, `upload()`'s own
+dedup check returns `AlreadyExists()` and the entry is silently dropped, exactly like
+the poller already does on `AlreadyExists()` (`poller.py:332-335`: log + remove from
+queue, no user-facing message). Skip/Overwrite stays exclusive to the live interactive
+flow, where `list_docs` runs *before* `fetch_transcript` specifically so the user can
+be asked.
+
 ### Option B — bounded in-request retry with backoff
 
 Before giving up, retry `fetch_transcript` a couple of times in-process (e.g. 3
