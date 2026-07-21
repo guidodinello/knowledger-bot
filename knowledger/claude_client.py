@@ -33,9 +33,15 @@ class AuthError(Exception):
 
 
 class ClaudeClient:
-    def __init__(self, session_token: str, persist_path: Path | None = None) -> None:
+    def __init__(
+        self,
+        session_token: str,
+        persist_path: Path | None = None,
+        projects_persist_path: Path | None = None,
+    ) -> None:
         self._cookie = f"sessionKey={session_token}"
         self._persist_path = persist_path
+        self._projects_persist_path = projects_persist_path
         self._org_id_cache: str | None = None
         self._projects_cache: list[Project] | None = None
 
@@ -94,7 +100,19 @@ class ClaudeClient:
             response.raise_for_status()
             projects = response.json()
             self._projects_cache = projects
+            if self._projects_persist_path is not None:
+                self._persist_projects(self._projects_persist_path, projects)
         return projects
+
+    @staticmethod
+    def _persist_projects(path: Path, projects: list[Project]) -> None:
+        """Best-effort cache, not a durability guarantee like the session token — a
+        write failure here must not break the caller's already-successful fetch, so
+        it's logged rather than raised."""
+        try:
+            atomic_write_json(path, projects)
+        except PersistenceIOError:
+            logger.exception("Failed to persist project list cache to %s", path)
 
     def invalidate_projects(self) -> None:
         self._projects_cache = None
