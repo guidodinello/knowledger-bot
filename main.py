@@ -4,6 +4,7 @@ import signal
 from knowledger.bot import build_application
 from knowledger.config import Config, load_config
 from knowledger.logger import get_logger, init_logging
+from knowledger.pending_transcripts import run_pending_transcript_retrier
 
 
 async def _run_polling(app) -> None:
@@ -27,7 +28,10 @@ async def main_async(config: Config) -> None:
 
     try:
         async with asyncio.TaskGroup() as tg:
-            tasks = [tg.create_task(_run_polling(app))]
+            tasks = [
+                tg.create_task(_run_polling(app)),
+                tg.create_task(run_pending_transcript_retrier(app, config)),
+            ]
 
             if config.poller.auto_transcript_project is not None:
                 from knowledger.poller import run_poller
