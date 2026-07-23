@@ -191,6 +191,29 @@ async def drain_queue(
 
 
 _TELEGRAM_MAX_MESSAGE_LENGTH = 4096
+_INQUEUE_MAX_ENTRIES = 10  # per-section cap before a "+N more" trailer
+_STUCK_MARKER = "⚠️ "  # prefix for entries with upload_attempts > 0
+
+
+def _fmt_ts(iso: str) -> str:
+    """Absolute 'YYYY-MM-DD HH:MM' slice of an ISO-8601 string. Absolute, not
+    relative — a relative "2h ago" goes stale/misleading if the message sits unread."""
+    return iso[:16].replace("T", " ")
+
+
+def _cap_entries(
+    entry_lines: list[list[str]],
+    max_entries: int = _INQUEUE_MAX_ENTRIES,
+) -> list[str]:
+    """Flatten up to max_entries formatted entries (each a list of its own lines: a
+    bullet line plus any indented detail lines) and append a '+N more' trailer instead
+    of hard-truncating mid-bullet."""
+    capped = entry_lines[:max_entries]
+    lines = [line for entry in capped for line in entry]
+    remaining = len(entry_lines) - len(capped)
+    if remaining > 0:
+        lines.append(f"+{remaining} more")
+    return lines
 
 
 @_require_auth
@@ -198,57 +221,75 @@ async def cmd_inqueue(update: Update, context: CustomContext, user: User) -> Non
     if update.message is None:
         return
 
-    lines: list[str] = []
+    lines: list[str] = ["📊 Queue status", ""]
 
+    # 🔁 Retry queue — QueueEntry: has upload_attempts and is the only section /refresh drains.
     queue: Queue = context.bot_data["queue"]
-    entries = queue.peek()
-    lines.append("`petition_queue.json` (retry/upload queue)")
-    if entries:
-        for e in entries:
-            status = "pending" if e.state == "pending" else "in_flight"
+    retry_entries = queue.peek()
+    if retry_entries:
+        lines.append(f"🔁 Retry queue — {len(retry_entries)} queued")
+        entry_lines = []
+        for e in retry_entries:
+            marker = _STUCK_MARKER if e.upload_attempts else ""
             title = escape_markdown(e.video_title or e.file_name, version=1)
-            attempts = f" — attempts: {e.upload_attempts}" if e.upload_attempts else ""
-            lines.append(f"• [{status}] {title}{attempts}")
+            attempts = f" — {e.upload_attempts} failed attempts" if e.upload_attempts else ""
+            detail = f"  queued {_fmt_ts(e.queued_at)}"
+            if e.upload_attempts:
+                detail += " — run /refresh to retry"
+            entry_lines.append([f"• {marker}{title}{attempts}", detail])
+        lines.extend(_cap_entries(entry_lines))
     else:
-        lines.append("(empty)")
+        lines.append("🔁 Retry queue: empty")
 
     lines.append("")
 
+    # ⏳ Poller pending — PendingVideo: has upload_attempts and channel_name, no /refresh.
     state_path = context.bot_data["config"].storage.data_dir / "poller_state.json"
-    lines.append("`poller_state.json` (seen + pending videos)")
     try:
         state = PollerState.load(state_path)
     except PersistenceError as e:
         logger.exception("Failed to read poller state")
-        lines.append(f"(error: {escape_markdown(str(e), version=1)})")
+        lines.append(f"⏳ Poller: (error: {escape_markdown(str(e), version=1)})")
     else:
         if state.pending:
-            lines.append(f"pending: {len(state.pending)}")
+            lines.append(f"⏳ Poller — {len(state.pending)} pending")
+            entry_lines = []
             for v in state.pending:
+                marker = _STUCK_MARKER if v.upload_attempts else ""
                 title = escape_markdown(v.title, version=1)
                 channel_name = escape_markdown(v.channel_name, version=1)
-                attempts = f" — attempts: {v.upload_attempts}" if v.upload_attempts else ""
-                lines.append(f"• {title} — {channel_name}{attempts}")
+                attempts = f" — {v.upload_attempts} failed attempts" if v.upload_attempts else ""
+                detail = f"  seen {_fmt_ts(v.first_seen)}"
+                entry_lines.append([f"• {marker}{title} — {channel_name}{attempts}", detail])
+            lines.extend(_cap_entries(entry_lines))
         else:
-            lines.append("(no pending videos)")
+            lines.append("⏳ Poller: empty")
         if state.seen:
-            lines.append(f"seen: {len(state.seen)} videos total")
+            lines.append(f"{len(state.seen)} videos seen total")
 
     lines.append("")
 
-    lines.append("`pending_transcripts.json` (transcript fetches blocked, awaiting retry)")
+    # 📥 Blocked transcripts — PendingTranscript: no upload_attempts, no channel, no
+    # /refresh hint (drained automatically by the periodic retrier, not by /refresh).
+    lines.append("📥 Blocked transcripts")
     try:
         pending_transcripts = context.bot_data["pending_transcripts"].load()
     except PersistenceError as e:
         logger.exception("Failed to read pending transcripts")
-        lines.append(f"(error: {escape_markdown(str(e), version=1)})")
+        lines[-1] += f": (error: {escape_markdown(str(e), version=1)})"
     else:
         if pending_transcripts:
-            for t in pending_transcripts:
-                title = escape_markdown(t.video_title, version=1)
-                lines.append(f"• {title}")
+            lines[-1] += f" — {len(pending_transcripts)} blocked"
+            entry_lines = [
+                [
+                    f"• {escape_markdown(t.video_title, version=1)}",
+                    f"  queued {_fmt_ts(t.queued_at)}",
+                ]
+                for t in pending_transcripts
+            ]
+            lines.extend(_cap_entries(entry_lines))
         else:
-            lines.append("(empty)")
+            lines[-1] += ": empty"
 
     text = "\n".join(lines)
     if len(text) > _TELEGRAM_MAX_MESSAGE_LENGTH:
