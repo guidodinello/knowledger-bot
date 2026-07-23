@@ -18,7 +18,7 @@ from telegram.ext import (
 from telegram.helpers import escape_markdown
 
 from .claude_client import AuthError, ClaudeClient, Doc, Project
-from .config import Config
+from .config import Config, load_persisted_projects
 from .logger import get_logger
 from .pending_transcripts import PendingTranscript, PendingTranscriptStore
 from .persistence import PersistenceError
@@ -284,8 +284,20 @@ async def handle_youtube_url(update: Update, context: CustomContext, user: User)
     try:
         projects = await asyncio.to_thread(context.bot_data["claude_client"].list_projects)
     except AuthError as e:
-        await update.message.reply_text(f"Auth error: {e}")
-        return
+        try:
+            projects = load_persisted_projects(context.bot_data["config"].storage.data_dir)
+        except PersistenceError as cache_err:
+            logger.exception("Failed to load persisted project list")
+            await update.message.reply_text(
+                f"Auth error: {e}\nAlso failed to load the cached project list: {cache_err}",
+            )
+            return
+        if not projects:
+            await update.message.reply_text(f"Auth error: {e}")
+            return
+        await update.message.reply_text(
+            "⚠️ Using last known project list — may not include newly created projects.",
+        )
     if not projects:
         await update.message.reply_text(
             "No projects found. Use /refresh to reload your Claude projects.",
@@ -348,20 +360,26 @@ async def handle_project_selection(update: Update, context: CustomContext, user:
 
     await query.edit_message_text("Checking project...")
 
+    docs: list[Doc] | None
     try:
-        docs: list[Doc] = await asyncio.to_thread(
+        docs = await asyncio.to_thread(
             context.bot_data["claude_client"].list_docs,
             project_id,
         )
-    except AuthError as e:
-        await query.edit_message_text(f"Auth error: {e}")
-        return
+    except AuthError:
+        # Can't dedupe right now — fall through to fetch + service.upload, which will
+        # hit the same AuthError again via its own internal list_docs(docs=None) call
+        # and correctly return DeferredForAuth for the queuing logic below, instead of
+        # dead-ending here before a transcript was ever fetched.
+        docs = None
     except Exception as e:
         logger.exception("Failed to list docs for project %s", project_id)
         await query.edit_message_text(f"Failed to check for duplicates: {e}")
         return
 
-    existing = next((d for d in docs if d["file_name"] == file_name), None)
+    existing = (
+        next((d for d in docs if d["file_name"] == file_name), None) if docs is not None else None
+    )
     if existing:
         context.user_data[f"pending_{msg_id_str}"] = PendingUpload(
             project_id=project_id,
@@ -675,6 +693,7 @@ def build_application(config: Config) -> Application:
     app.bot_data["claude_client"] = ClaudeClient(
         config.claude.session_token,
         persist_path=config.storage.data_dir / "session_token.json",
+        projects_persist_path=config.storage.data_dir / "projects_cache.json",
     )
     queue = Queue(path=config.storage.data_dir / "petition_queue.json")
     recovered = queue.recover_abandoned()

@@ -2,9 +2,11 @@ import os
 from dataclasses import dataclass, field
 from datetime import date
 from pathlib import Path
+from typing import cast
 
 from dotenv import load_dotenv
 
+from .claude_client import Project
 from .logger import get_logger
 from .persistence import CorruptDataError, load_json
 
@@ -28,6 +30,27 @@ def _load_persisted_token(data_dir: Path) -> str | None:
         raise CorruptDataError(path, "expected a JSON object with a string 'token' field")
     token = raw["token"].strip()
     return token or None
+
+
+def load_persisted_projects(data_dir: Path) -> list[Project] | None:
+    """Read the project list cache written by ClaudeClient.list_projects() on its last
+    successful fetch — a fallback for callers hitting AuthError before any project
+    list is available in memory (e.g. right after the session token goes bad, before
+    /refresh or a token update repopulates the in-process cache). The result may be
+    stale (missing projects created since the last successful fetch).
+
+    A missing file is a valid state (no successful fetch has happened yet). An
+    existing but corrupt file fails closed, same rationale as `_load_persisted_token`."""
+    path = data_dir / "projects_cache.json"
+    raw = load_json(path)
+    if raw is None:
+        return None
+    if not isinstance(raw, list) or not all(
+        isinstance(p, dict) and isinstance(p.get("uuid"), str) and isinstance(p.get("name"), str)
+        for p in raw
+    ):
+        raise CorruptDataError(path, "expected a JSON array of {uuid, name} project objects")
+    return cast(list[Project], raw)
 
 
 @dataclass(frozen=True, slots=True)
