@@ -153,3 +153,29 @@ class Queue:
     def _save(self, entries: list[QueueEntry]) -> None:
         payload = {"version": SCHEMA_VERSION, "entries": [asdict(e) for e in entries]}
         atomic_write_json(self.path, payload)
+
+
+def build_auth_fallback_entry(
+    *,
+    project_id: str,
+    video_id: str,
+    file_name: str,
+    transcript: str,
+    chat_id: int,
+    video_title: str,
+    overwrite_doc_uuid: str | None = None,
+) -> QueueEntry:
+    """Build a QueueEntry for the auth-fallback path: upload hit AuthError but a
+    transcript is already in hand, so it gets parked in petition_queue.json for
+    /refresh to retry instead of being lost. Shared by the poller and the
+    interactive-flow transcript retrier, which both hit this same fallback."""
+    return QueueEntry(
+        project_id=project_id,
+        video_id=video_id,
+        file_name=file_name,
+        transcript=transcript,
+        chat_id=chat_id,
+        video_title=video_title,
+        queued_at=datetime.now(UTC).isoformat(),
+        overwrite_doc_uuid=overwrite_doc_uuid,
+    )

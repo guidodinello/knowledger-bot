@@ -20,6 +20,7 @@ from telegram.helpers import escape_markdown
 from .claude_client import AuthError, ClaudeClient, Doc, Project
 from .config import Config
 from .logger import get_logger
+from .pending_transcripts import PendingTranscript, PendingTranscriptStore
 from .persistence import PersistenceError
 from .poller import PollerState
 from .queue import Queue, QueueEntry
@@ -42,6 +43,7 @@ class BotData(TypedDict):
     claude_client: ClaudeClient
     queue: Queue
     queue_processor: QueueProcessor
+    pending_transcripts: PendingTranscriptStore
 
 
 class PendingUpload(TypedDict):
@@ -232,6 +234,22 @@ async def cmd_inqueue(update: Update, context: CustomContext, user: User) -> Non
         if state.seen:
             lines.append(f"seen: {len(state.seen)} videos total")
 
+    lines.append("")
+
+    lines.append("pending_transcripts.json (transcript fetches blocked, awaiting retry)")
+    try:
+        pending_transcripts = context.bot_data["pending_transcripts"].load()
+    except PersistenceError as e:
+        logger.exception("Failed to read pending transcripts")
+        lines.append(f"(error: {escape_markdown(str(e), version=1)})")
+    else:
+        if pending_transcripts:
+            for t in pending_transcripts:
+                title = escape_markdown(t.video_title, version=1)
+                lines.append(f"• {title}")
+        else:
+            lines.append("(empty)")
+
     text = "\n".join(lines)
     if len(text) > _TELEGRAM_MAX_MESSAGE_LENGTH:
         truncated_note = "\n… (truncated)"
@@ -386,8 +404,28 @@ async def handle_project_selection(update: Update, context: CustomContext, user:
         )
         return
     except TranscriptTransportError:
+        if update.effective_chat is None:
+            return
+        pending_entry = PendingTranscript(
+            chat_id=update.effective_chat.id,
+            project_id=project_id,
+            video_id=metadata.video_id,
+            file_name=file_name,
+            video_title=metadata.title,
+            queued_at=datetime.now(UTC).isoformat(),
+        )
+        try:
+            context.bot_data["pending_transcripts"].add(pending_entry)
+        except PersistenceError:
+            logger.exception("Failed to persist pending transcript for %s", file_name)
+            await query.edit_message_text(
+                "Transcript request was blocked and could not be queued for retry — "
+                "please resend the URL shortly.",
+            )
+            return
         await query.edit_message_text(
-            "Transcript request was blocked — this is usually temporary. Please try again shortly.",
+            "Transcript request was blocked — this is usually temporary. It's been "
+            "queued and will retry automatically.",
         )
         return
 
@@ -494,8 +532,29 @@ async def handle_duplicate_choice(update: Update, context: CustomContext, user: 
         )
         return
     except TranscriptTransportError:
+        if update.effective_chat is None:
+            return
+        pending_entry = PendingTranscript(
+            chat_id=update.effective_chat.id,
+            project_id=pending["project_id"],
+            video_id=pending["video_id"],
+            file_name=pending["file_name"],
+            video_title=pending["file_name"],
+            queued_at=datetime.now(UTC).isoformat(),
+            overwrite_doc_uuid=doc_uuid,
+        )
+        try:
+            context.bot_data["pending_transcripts"].add(pending_entry)
+        except PersistenceError:
+            logger.exception("Failed to persist pending transcript for %s", pending["file_name"])
+            await query.edit_message_text(
+                "Transcript request was blocked and could not be queued for retry — "
+                "please retry the overwrite shortly.",
+            )
+            return
         await query.edit_message_text(
-            "Transcript request was blocked — this is usually temporary. Please try again shortly.",
+            "Transcript request was blocked — this is usually temporary. It's been "
+            "queued and will retry automatically.",
         )
         return
 
@@ -627,6 +686,9 @@ def build_application(config: Config) -> Application:
         )
     app.bot_data["queue"] = queue
     app.bot_data["queue_processor"] = QueueProcessor(queue)
+    app.bot_data["pending_transcripts"] = PendingTranscriptStore(
+        path=config.storage.data_dir / "pending_transcripts.json",
+    )
 
     app.add_handler(CommandHandler("start", cmd_start))
     app.add_handler(CommandHandler("help", cmd_help))
