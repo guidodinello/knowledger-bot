@@ -286,9 +286,12 @@ async def handle_youtube_url(update: Update, context: CustomContext, user: User)
     except AuthError as e:
         try:
             projects = load_persisted_projects(context.bot_data["config"].storage.data_dir)
-        except PersistenceError:
+        except PersistenceError as cache_err:
             logger.exception("Failed to load persisted project list")
-            projects = None
+            await update.message.reply_text(
+                f"Auth error: {e}\nAlso failed to load the cached project list: {cache_err}",
+            )
+            return
         if not projects:
             await update.message.reply_text(f"Auth error: {e}")
             return

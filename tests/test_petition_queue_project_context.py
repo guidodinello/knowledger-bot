@@ -242,6 +242,7 @@ def test_handle_youtube_url_fails_closed_on_corrupt_persisted_cache(
     asyncio.run(handle_youtube_url(update, context))
 
     assert message.replies[-1].startswith("Auth error:")
+    assert "cached project list" in message.replies[-1]
 
 
 # --- handle_project_selection: dedup-check AuthError falls through ----------------
