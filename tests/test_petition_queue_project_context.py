@@ -2,10 +2,12 @@ import asyncio
 import json
 from pathlib import Path
 from types import SimpleNamespace
+from typing import cast
 
 import pytest
+from telegram import Update
 
-from knowledger.bot import handle_project_selection, handle_youtube_url
+from knowledger.bot import CustomContext, handle_project_selection, handle_youtube_url
 from knowledger.claude_client import AuthError, ClaudeClient
 from knowledger.config import (
     ClaudeSettings,
@@ -51,7 +53,10 @@ class FakeQuery:
         pass
 
     async def edit_message_text(
-        self, text: str, parse_mode: str | None = None, reply_markup=None,
+        self,
+        text: str,
+        parse_mode: str | None = None,
+        reply_markup=None,
     ) -> None:
         self.edits.append(text)
 
@@ -61,7 +66,11 @@ class FakeQuery:
 
 class FakeUpdate:
     def __init__(
-        self, message=None, callback_query=None, user_id: int = 1, chat_id: int = 1,
+        self,
+        message=None,
+        callback_query=None,
+        user_id: int = 1,
+        chat_id: int = 1,
     ) -> None:
         self.message = message
         self.callback_query = callback_query
@@ -149,7 +158,8 @@ def _patch_projects_endpoint(monkeypatch: pytest.MonkeyPatch, projects: list[dic
 
 
 def test_list_projects_persists_cache_on_success(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     _patch_projects_endpoint(monkeypatch, [{"uuid": "p1", "name": "Proj"}])
     cache_path = tmp_path / "projects_cache.json"
@@ -162,7 +172,8 @@ def test_list_projects_persists_cache_on_success(
 
 
 def test_list_projects_persist_failure_does_not_break_the_fetch(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     _patch_projects_endpoint(monkeypatch, [{"uuid": "p1", "name": "Proj"}])
     unwritable = tmp_path / "missing-parent-dir" / "projects_cache.json"
@@ -178,7 +189,8 @@ def test_list_projects_persist_failure_does_not_break_the_fetch(
 
 
 def test_handle_youtube_url_falls_back_to_persisted_projects_on_auth_error(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     (tmp_path / "projects_cache.json").write_text(
         json.dumps([{"uuid": "p1", "name": "Cached Project"}]),
@@ -186,7 +198,10 @@ def test_handle_youtube_url_falls_back_to_persisted_projects_on_auth_error(
     monkeypatch.setattr(
         "knowledger.bot.fetch_video_metadata",
         lambda url, proxy: VideoMetadata(
-            video_id="v1", title="Title", channel_name="Channel", upload_date=None,
+            video_id="v1",
+            title="Title",
+            channel_name="Channel",
+            upload_date=None,
         ),
     )
     client = FakeClaudeClient()
@@ -195,7 +210,7 @@ def test_handle_youtube_url_falls_back_to_persisted_projects_on_auth_error(
     update = FakeUpdate(message=message)
     context = FakeContext(bot_data={"config": _config(tmp_path), "claude_client": client})
 
-    asyncio.run(handle_youtube_url(update, context))
+    asyncio.run(handle_youtube_url(cast(Update, update), cast(CustomContext, context)))
 
     assert any("Using last known project list" in r for r in message.replies)
     assert any("Select a project" in r for r in message.replies)
@@ -203,12 +218,16 @@ def test_handle_youtube_url_falls_back_to_persisted_projects_on_auth_error(
 
 
 def test_handle_youtube_url_dead_ends_without_any_persisted_projects(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     monkeypatch.setattr(
         "knowledger.bot.fetch_video_metadata",
         lambda url, proxy: VideoMetadata(
-            video_id="v1", title="Title", channel_name="Channel", upload_date=None,
+            video_id="v1",
+            title="Title",
+            channel_name="Channel",
+            upload_date=None,
         ),
     )
     client = FakeClaudeClient()
@@ -217,20 +236,24 @@ def test_handle_youtube_url_dead_ends_without_any_persisted_projects(
     update = FakeUpdate(message=message)
     context = FakeContext(bot_data={"config": _config(tmp_path), "claude_client": client})
 
-    asyncio.run(handle_youtube_url(update, context))
+    asyncio.run(handle_youtube_url(cast(Update, update), cast(CustomContext, context)))
 
     assert message.replies[-1].startswith("Auth error:")
     assert "video_1" not in context.user_data
 
 
 def test_handle_youtube_url_fails_closed_on_corrupt_persisted_cache(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     (tmp_path / "projects_cache.json").write_text("not json")
     monkeypatch.setattr(
         "knowledger.bot.fetch_video_metadata",
         lambda url, proxy: VideoMetadata(
-            video_id="v1", title="Title", channel_name="Channel", upload_date=None,
+            video_id="v1",
+            title="Title",
+            channel_name="Channel",
+            upload_date=None,
         ),
     )
     client = FakeClaudeClient()
@@ -239,7 +262,7 @@ def test_handle_youtube_url_fails_closed_on_corrupt_persisted_cache(
     update = FakeUpdate(message=message)
     context = FakeContext(bot_data={"config": _config(tmp_path), "claude_client": client})
 
-    asyncio.run(handle_youtube_url(update, context))
+    asyncio.run(handle_youtube_url(cast(Update, update), cast(CustomContext, context)))
 
     assert message.replies[-1].startswith("Auth error:")
     assert "cached project list" in message.replies[-1]
@@ -249,7 +272,8 @@ def test_handle_youtube_url_fails_closed_on_corrupt_persisted_cache(
 
 
 def test_dedup_check_auth_error_falls_through_to_queue(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     monkeypatch.setattr(
         "knowledger.bot.fetch_transcript",
@@ -268,12 +292,15 @@ def test_dedup_check_auth_error_falls_through_to_queue(
         },
         user_data={
             "video_1": VideoMetadata(
-                video_id="v1", title="Title", channel_name="Channel", upload_date="20260101",
+                video_id="v1",
+                title="Title",
+                channel_name="Channel",
+                upload_date="20260101",
             ),
         },
     )
 
-    asyncio.run(handle_project_selection(update, context))
+    asyncio.run(handle_project_selection(cast(Update, update), cast(CustomContext, context)))
 
     assert "expired" in query.edits[-1].lower()
     entries = queue.peek()
@@ -284,7 +311,8 @@ def test_dedup_check_auth_error_falls_through_to_queue(
 
 
 def test_dedup_check_still_finds_duplicates_when_token_is_healthy(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """Unaffected control case: a healthy list_docs call still detects an existing doc
     and prompts Skip/Overwrite instead of always falling through to upload."""
@@ -294,7 +322,10 @@ def test_dedup_check_still_finds_duplicates_when_token_is_healthy(
     )
     client = FakeClaudeClient()
     metadata = VideoMetadata(
-        video_id="v1", title="Title", channel_name="Channel", upload_date="20260101",
+        video_id="v1",
+        title="Title",
+        channel_name="Channel",
+        upload_date="20260101",
     )
     from knowledger.youtube import build_doc_name
 
@@ -312,7 +343,7 @@ def test_dedup_check_still_finds_duplicates_when_token_is_healthy(
         user_data={"video_1": metadata},
     )
 
-    asyncio.run(handle_project_selection(update, context))
+    asyncio.run(handle_project_selection(cast(Update, update), cast(CustomContext, context)))
 
     assert "skip or overwrite" in query.edits[-1].lower()
     assert queue.peek() == []

@@ -146,7 +146,7 @@ def build_aiohttp_app(
 async def run_http_server(aiohttp_app: web.Application, port: int) -> None:
     runner = web.AppRunner(aiohttp_app)
     await runner.setup()
-    await web.TCPSite(runner, "0.0.0.0", port).start()  # nosec B104 - container-internal listener, not exposed directly to the internet
+    await web.TCPSite(runner, "0.0.0.0", port).start()  # nosec B104 - binds all interfaces since this runs in a container; the port is reachable from the internet in deployment, so /update-token relies on its own secret+HMAC check, not network isolation, for auth
     logger.info("Token update server listening on port %d", port)
     try:
         await asyncio.Event().wait()
