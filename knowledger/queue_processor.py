@@ -6,6 +6,7 @@ calls stay atomic on their own (see queue.py)."""
 
 import asyncio
 from dataclasses import dataclass
+from datetime import UTC, datetime
 
 from curl_cffi.requests.exceptions import RequestException
 from telegram.ext import Application
@@ -13,6 +14,7 @@ from telegram.helpers import escape_markdown
 
 from .claude_client import AuthError, ClaudeClient, Doc
 from .config import Config
+from .history import UploadRecord, record_upload
 from .logger import get_logger
 from .notify import notify
 from .queue import Queue, QueueEntry
@@ -128,6 +130,16 @@ class QueueProcessor:
             case Uploaded():
                 self._queue.ack(entry.id)
                 result.uploaded += 1
+                record_upload(
+                    config.storage.data_dir,
+                    UploadRecord(
+                        project_id=entry.project_id,
+                        file_name=entry.file_name,
+                        video_title=entry.video_title,
+                        channel_name=entry.channel_name,
+                        uploaded_at=datetime.now(UTC).isoformat(),
+                    ),
+                )
                 escaped = escape_markdown(entry.file_name, version=1)
                 await telegram_app.bot.send_message(
                     entry.chat_id,

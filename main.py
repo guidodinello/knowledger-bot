@@ -49,6 +49,11 @@ async def main_async(config: Config) -> None:
                 )
                 tasks.append(tg.create_task(run_http_server(aiohttp_app, config.token_server.port)))
 
+            if config.weekly_recap.enabled:
+                from knowledger.weekly_recap import run_weekly_recap
+
+                tasks.append(tg.create_task(run_weekly_recap(app, config)))
+
             loop = asyncio.get_running_loop()
 
             def _shutdown() -> None:

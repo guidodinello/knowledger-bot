@@ -48,6 +48,32 @@ def test_queue_enqueue_dedups_on_project_and_video(tmp_path: Path) -> None:
     assert len(queue.peek()) == 1
 
 
+def test_queue_entry_without_channel_name_defaults_blank(tmp_path: Path) -> None:
+    # A version-2 queue file written before channel_name existed must still load —
+    # the field is optional/defaulted, not a schema bump.
+    path = tmp_path / "q.json"
+    path.write_text(
+        json.dumps(
+            {
+                "version": 2,
+                "entries": [
+                    {
+                        "project_id": "p",
+                        "video_id": "v",
+                        "file_name": "f",
+                        "transcript": "t",
+                        "chat_id": 1,
+                        "video_title": "T",
+                        "queued_at": "now",
+                    },
+                ],
+            },
+        ),
+    )
+    entries = Queue(path=path).peek()
+    assert entries[0].channel_name == ""
+
+
 def test_poller_state_missing_file_is_empty(tmp_path: Path) -> None:
     state = PollerState.load(tmp_path / "state.json")
     assert state.seen == set()

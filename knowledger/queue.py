@@ -25,6 +25,7 @@ class QueueEntry:
     chat_id: int
     video_title: str
     queued_at: str  # ISO-8601, for display only
+    channel_name: str = ""  # for the weekly recap; blank for old entries predating it
     upload_attempts: int = 0  # consecutive non-auth retry failures, for the stuck-entry alert
     overwrite_doc_uuid: str | None = None  # set for an overwrite retry: delete this doc first
     id: str = ""  # assigned by Queue.enqueue(); empty only before first persistence
@@ -163,6 +164,7 @@ def build_auth_fallback_entry(
     transcript: str,
     chat_id: int,
     video_title: str,
+    channel_name: str = "",
     overwrite_doc_uuid: str | None = None,
 ) -> QueueEntry:
     """Build a QueueEntry for the auth-fallback path: upload hit AuthError but a
@@ -177,5 +179,6 @@ def build_auth_fallback_entry(
         chat_id=chat_id,
         video_title=video_title,
         queued_at=datetime.now(UTC).isoformat(),
+        channel_name=channel_name,
         overwrite_doc_uuid=overwrite_doc_uuid,
     )

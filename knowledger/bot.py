@@ -19,6 +19,7 @@ from telegram.helpers import escape_markdown
 
 from .claude_client import AuthError, ClaudeClient, Doc, Project
 from .config import Config, load_persisted_projects
+from .history import UploadRecord, record_upload
 from .logger import get_logger
 from .pending_transcripts import PendingTranscript, PendingTranscriptStore
 from .persistence import PersistenceError
@@ -50,6 +51,7 @@ class PendingUpload(TypedDict):
     project_id: str
     file_name: str
     video_id: str
+    channel_name: str
 
 
 CustomContext = CallbackContext[Any, dict, dict, BotData]
@@ -426,6 +428,7 @@ async def handle_project_selection(update: Update, context: CustomContext, user:
             project_id=project_id,
             file_name=file_name,
             video_id=metadata.video_id,
+            channel_name=metadata.channel_name,
         )
         keyboard = InlineKeyboardMarkup(
             [
@@ -472,6 +475,7 @@ async def handle_project_selection(update: Update, context: CustomContext, user:
             file_name=file_name,
             video_title=metadata.title,
             queued_at=datetime.now(UTC).isoformat(),
+            channel_name=metadata.channel_name,
         )
         try:
             context.bot_data["pending_transcripts"].add(pending_entry)
@@ -498,6 +502,16 @@ async def handle_project_selection(update: Update, context: CustomContext, user:
         case Uploaded():
             context.user_data.pop(f"video_{msg_id_str}", None)
             logger.info("Upload complete: %s -> project %s", file_name, project_id)
+            record_upload(
+                context.bot_data["config"].storage.data_dir,
+                UploadRecord(
+                    project_id=project_id,
+                    file_name=file_name,
+                    video_title=metadata.title,
+                    channel_name=metadata.channel_name,
+                    uploaded_at=datetime.now(UTC).isoformat(),
+                ),
+            )
             await query.edit_message_text(
                 f"Saved *{escape_markdown(file_name, version=1)}* to project.",
                 parse_mode="Markdown",
@@ -522,6 +536,7 @@ async def handle_project_selection(update: Update, context: CustomContext, user:
                 chat_id=update.effective_chat.id,
                 video_title=metadata.title,
                 queued_at=datetime.now(UTC).isoformat(),
+                channel_name=metadata.channel_name,
             )
             try:
                 added = context.bot_data["queue"].enqueue(entry)
@@ -600,6 +615,7 @@ async def handle_duplicate_choice(update: Update, context: CustomContext, user: 
             file_name=pending["file_name"],
             video_title=pending["file_name"],
             queued_at=datetime.now(UTC).isoformat(),
+            channel_name=pending["channel_name"],
             overwrite_doc_uuid=doc_uuid,
         )
         try:
@@ -633,6 +649,7 @@ async def handle_duplicate_choice(update: Update, context: CustomContext, user: 
         chat_id=update.effective_chat.id,
         video_title=pending["file_name"],
         queued_at=datetime.now(UTC).isoformat(),
+        channel_name=pending["channel_name"],
         overwrite_doc_uuid=doc_uuid,
     )
     queue: Queue = context.bot_data["queue"]
@@ -681,6 +698,16 @@ async def handle_duplicate_choice(update: Update, context: CustomContext, user: 
                     "Overwrite complete: %s -> project %s",
                     pending["file_name"],
                     pending["project_id"],
+                )
+                record_upload(
+                    context.bot_data["config"].storage.data_dir,
+                    UploadRecord(
+                        project_id=claimed.project_id,
+                        file_name=claimed.file_name,
+                        video_title=claimed.video_title,
+                        channel_name=claimed.channel_name,
+                        uploaded_at=datetime.now(UTC).isoformat(),
+                    ),
                 )
                 await query.edit_message_text(
                     f"Saved *{escaped}* to project.",

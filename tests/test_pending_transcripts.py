@@ -9,7 +9,14 @@ from curl_cffi.requests.exceptions import RequestException
 from telegram.ext import Application
 
 from knowledger.claude_client import AuthError, ClaudeClient
-from knowledger.config import ClaudeSettings, Config, LoggerConfig, TelegramSettings
+from knowledger.config import (
+    ClaudeSettings,
+    Config,
+    LoggerConfig,
+    StorageSettings,
+    TelegramSettings,
+)
+from knowledger.history import load_history
 from knowledger.pending_transcripts import (
     PendingTranscript,
     PendingTranscriptStore,
@@ -53,16 +60,23 @@ class FakeClaudeClient:
         self.docs[project_id] = [d for d in self.docs.get(project_id, []) if d["uuid"] != uuid]
 
 
-def _config() -> Config:
+def _config(data_dir: Path) -> Config:
+    # data_dir must point at tmp_path, not the default "." — record_upload() now
+    # writes upload_history.json as a side effect of a successful retry, and the
+    # default would otherwise write into the real repo working directory.
     return Config(
         logger=LoggerConfig(),
         telegram=TelegramSettings(bot_token="x", allowed_user_ids=frozenset({1})),
         claude=ClaudeSettings(session_token="x"),
+        storage=StorageSettings(data_dir=data_dir),
     )
 
 
 def _entry(
-    video_id: str, file_name: str = "f", project_id: str = "p", **overrides,
+    video_id: str,
+    file_name: str = "f",
+    project_id: str = "p",
+    **overrides,
 ) -> PendingTranscript:
     fields = {
         "chat_id": 1,
@@ -78,7 +92,11 @@ def _entry(
 
 async def _drain(app, config, client, queue, store) -> None:
     await drain_pending_transcripts(
-        cast(Application, app), config, cast(ClaudeClient, client), queue, store,
+        cast(Application, app),
+        config,
+        cast(ClaudeClient, client),
+        queue,
+        store,
     )
 
 
@@ -88,6 +106,28 @@ async def _drain(app, config, client, queue, store) -> None:
 def test_missing_file_is_empty(tmp_path: Path) -> None:
     store = PendingTranscriptStore(path=tmp_path / "p.json")
     assert store.load() == []
+
+
+def test_entry_without_channel_name_defaults_blank(tmp_path: Path) -> None:
+    # A pending_transcripts.json array written before channel_name existed must still
+    # load — the field is optional/defaulted, not a schema bump.
+    path = tmp_path / "p.json"
+    path.write_text(
+        json.dumps(
+            [
+                {
+                    "chat_id": 1,
+                    "project_id": "p",
+                    "video_id": "v1",
+                    "file_name": "f1",
+                    "video_title": "T1",
+                    "queued_at": "now",
+                },
+            ],
+        ),
+    )
+    entries = PendingTranscriptStore(path=path).load()
+    assert entries[0].channel_name == ""
 
 
 def test_add_persists_and_dedups_on_project_and_video(tmp_path: Path) -> None:
@@ -163,7 +203,7 @@ def test_still_blocked_stays_pending(tmp_path: Path) -> None:
         "knowledger.pending_transcripts.fetch_transcript",
         side_effect=TranscriptTransportError("v1"),
     ):
-        asyncio.run(_drain(app, _config(), client, queue, store))
+        asyncio.run(_drain(app, _config(tmp_path), client, queue, store))
 
     assert len(store.load()) == 1
     assert app.bot.sent == []
@@ -180,7 +220,7 @@ def test_still_unavailable_gives_up_and_notifies(tmp_path: Path) -> None:
         "knowledger.pending_transcripts.fetch_transcript",
         side_effect=TranscriptUnavailable("v1"),
     ):
-        asyncio.run(_drain(app, _config(), client, queue, store))
+        asyncio.run(_drain(app, _config(tmp_path), client, queue, store))
 
     assert store.load() == []
     assert len(app.bot.sent) == 1
@@ -189,18 +229,26 @@ def test_still_unavailable_gives_up_and_notifies(tmp_path: Path) -> None:
 
 def test_successful_retry_uploads_and_notifies_and_drops_entry(tmp_path: Path) -> None:
     store = PendingTranscriptStore(path=tmp_path / "p.json")
-    store.add(_entry("v1", file_name="f1"))
+    store.add(_entry("v1", file_name="f1", channel_name="Ch1"))
     app = FakeTelegramApp()
     queue = Queue(path=tmp_path / "q.json")
     client = FakeClaudeClient()
 
     with patch("knowledger.pending_transcripts.fetch_transcript", return_value="transcript text"):
-        asyncio.run(_drain(app, _config(), client, queue, store))
+        asyncio.run(_drain(app, _config(tmp_path), client, queue, store))
 
     assert store.load() == []
     assert client.docs["p"] == [{"uuid": "u1", "file_name": "f1"}]
     assert len(app.bot.sent) == 1
     assert "f1" in app.bot.sent[0][1]
+
+    # A transcript that was transiently blocked and later retried successfully must
+    # still show up in the weekly recap history — this is a real upload, just a
+    # delayed one.
+    history = load_history(tmp_path)
+    assert len(history) == 1
+    assert history[0].file_name == "f1"
+    assert history[0].channel_name == "Ch1"
 
 
 def test_already_exists_drops_entry_silently(tmp_path: Path) -> None:
@@ -212,7 +260,7 @@ def test_already_exists_drops_entry_silently(tmp_path: Path) -> None:
     client.docs["p"] = [{"uuid": "existing", "file_name": "f1"}]
 
     with patch("knowledger.pending_transcripts.fetch_transcript", return_value="transcript text"):
-        asyncio.run(_drain(app, _config(), client, queue, store))
+        asyncio.run(_drain(app, _config(tmp_path), client, queue, store))
 
     assert store.load() == []
     assert app.bot.sent == []
@@ -229,7 +277,7 @@ def test_deferred_for_auth_moves_entry_into_petition_queue(tmp_path: Path) -> No
     client.docs["p"] = [{"uuid": "old-uuid", "file_name": "f1"}]
 
     with patch("knowledger.pending_transcripts.fetch_transcript", return_value="transcript text"):
-        asyncio.run(_drain(app, _config(), client, queue, store))
+        asyncio.run(_drain(app, _config(tmp_path), client, queue, store))
 
     assert store.load() == []
     queued = queue.peek()
@@ -254,7 +302,7 @@ def test_transient_upload_failure_stays_pending(tmp_path: Path) -> None:
     client = FlakyClient()
 
     with patch("knowledger.pending_transcripts.fetch_transcript", return_value="transcript text"):
-        asyncio.run(_drain(app, _config(), client, queue, store))
+        asyncio.run(_drain(app, _config(tmp_path), client, queue, store))
 
     assert len(store.load()) == 1
     assert queue.peek() == []
@@ -277,7 +325,7 @@ def test_auth_error_listing_docs_moves_entry_into_petition_queue(tmp_path: Path)
     client = AuthFailingClient()
 
     with patch("knowledger.pending_transcripts.fetch_transcript", return_value="transcript text"):
-        asyncio.run(_drain(app, _config(), client, queue, store))
+        asyncio.run(_drain(app, _config(tmp_path), client, queue, store))
 
     assert store.load() == []
     queued = queue.peek()
@@ -315,7 +363,7 @@ def test_second_auth_failure_for_same_video_reports_already_queued(tmp_path: Pat
     client = AuthFailingClient()
 
     with patch("knowledger.pending_transcripts.fetch_transcript", return_value="transcript text"):
-        asyncio.run(_drain(app, _config(), client, queue, store))
+        asyncio.run(_drain(app, _config(tmp_path), client, queue, store))
 
     assert store.load() == []
     queued = queue.peek()
@@ -345,7 +393,7 @@ def test_docs_are_listed_once_per_project_across_a_batch(tmp_path: Path) -> None
     client = CountingClient()
 
     with patch("knowledger.pending_transcripts.fetch_transcript", return_value="transcript text"):
-        asyncio.run(_drain(app, _config(), client, queue, store))
+        asyncio.run(_drain(app, _config(tmp_path), client, queue, store))
 
     assert client.list_docs_calls == 1
     assert store.load() == []
@@ -375,7 +423,7 @@ def test_notify_failure_does_not_abort_remaining_entries_in_batch(tmp_path: Path
     app.bot = FlakyBot()
 
     with patch("knowledger.pending_transcripts.fetch_transcript", return_value="transcript text"):
-        asyncio.run(_drain(app, _config(), client, queue, store))
+        asyncio.run(_drain(app, _config(tmp_path), client, queue, store))
 
     assert store.load() == []  # both entries resolved despite the first notify failing
     assert app.bot.sent == [(2, "Transcript request unblocked — saved *f2* to project.")]
