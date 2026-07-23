@@ -85,6 +85,7 @@ def _entry(
         "file_name": file_name,
         "video_title": "Title",
         "queued_at": "now",
+        "channel_name": "Ch",
         **overrides,
     }
     return PendingTranscript(**fields)
@@ -108,9 +109,11 @@ def test_missing_file_is_empty(tmp_path: Path) -> None:
     assert store.load() == []
 
 
-def test_entry_without_channel_name_defaults_blank(tmp_path: Path) -> None:
-    # A pending_transcripts.json array written before channel_name existed must still
-    # load — the field is optional/defaulted, not a schema bump.
+def test_entry_missing_channel_name_fails_closed(tmp_path: Path) -> None:
+    # channel_name is a required field (no default) so that no upload ever silently
+    # goes unrecorded in the weekly recap — a pending_transcripts.json array written
+    # before the field existed must be fixed up (see scripts/backfill_channel_name.py)
+    # rather than loading with a silently blank value.
     path = tmp_path / "p.json"
     path.write_text(
         json.dumps(
@@ -126,8 +129,8 @@ def test_entry_without_channel_name_defaults_blank(tmp_path: Path) -> None:
             ],
         ),
     )
-    entries = PendingTranscriptStore(path=path).load()
-    assert entries[0].channel_name == ""
+    with pytest.raises(CorruptDataError):
+        PendingTranscriptStore(path=path).load()
 
 
 def test_add_persists_and_dedups_on_project_and_video(tmp_path: Path) -> None:
@@ -353,6 +356,7 @@ def test_second_auth_failure_for_same_video_reports_already_queued(tmp_path: Pat
             chat_id=1,
             video_title="Title",
             queued_at="earlier",
+            channel_name="Ch",
         ),
     )
 

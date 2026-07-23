@@ -48,7 +48,7 @@ class PendingTranscript:
     file_name: str
     video_title: str
     queued_at: str  # ISO-8601, for display only
-    channel_name: str = ""  # for the weekly recap; blank for old entries predating it
+    channel_name: str  # for the weekly recap; required — see scripts/backfill_channel_name.py
     overwrite_doc_uuid: str | None = None  # set for a blocked overwrite retry
 
 
@@ -69,7 +69,12 @@ class PendingTranscriptStore:
         try:
             return [PendingTranscript(**p) for p in raw]
         except TypeError as e:
-            raise CorruptDataError(self.path, f"malformed pending transcript entry: {e}") from e
+            raise CorruptDataError(
+                self.path,
+                f"malformed pending transcript entry: {e} — if this is a missing "
+                "channel_name on an entry from before that field existed, run "
+                "scripts/backfill_channel_name.py against this DATA_DIR",
+            ) from e
 
     def add(self, entry: PendingTranscript) -> bool:
         """Persist entry, deduped on project_id+video_id. If an existing entry for the

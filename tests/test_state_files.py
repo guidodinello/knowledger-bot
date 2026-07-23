@@ -40,6 +40,7 @@ def test_queue_enqueue_dedups_on_project_and_video(tmp_path: Path) -> None:
         chat_id=1,
         video_title="T",
         queued_at="now",
+        channel_name="C",
     )
     first = queue.enqueue(entry)
     second = queue.enqueue(entry)
@@ -48,9 +49,11 @@ def test_queue_enqueue_dedups_on_project_and_video(tmp_path: Path) -> None:
     assert len(queue.peek()) == 1
 
 
-def test_queue_entry_without_channel_name_defaults_blank(tmp_path: Path) -> None:
-    # A version-2 queue file written before channel_name existed must still load —
-    # the field is optional/defaulted, not a schema bump.
+def test_queue_entry_missing_channel_name_fails_closed(tmp_path: Path) -> None:
+    # channel_name is a required field (no default) so that no upload ever silently
+    # goes unrecorded in the weekly recap — a version-2 queue file written before the
+    # field existed must be fixed up (see scripts/backfill_channel_name.py) rather than
+    # loading with a silently blank value.
     path = tmp_path / "q.json"
     path.write_text(
         json.dumps(
@@ -70,8 +73,8 @@ def test_queue_entry_without_channel_name_defaults_blank(tmp_path: Path) -> None
             },
         ),
     )
-    entries = Queue(path=path).peek()
-    assert entries[0].channel_name == ""
+    with pytest.raises(CorruptDataError):
+        Queue(path=path).peek()
 
 
 def test_poller_state_missing_file_is_empty(tmp_path: Path) -> None:

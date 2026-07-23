@@ -99,6 +99,7 @@ def _entry(video_id: str, file_name: str, project_id: str = "p", **overrides) ->
         "chat_id": 1,
         "video_title": "Title",
         "queued_at": "now",
+        "channel_name": "Ch",
         **overrides,
     }
     return QueueEntry(**fields)
