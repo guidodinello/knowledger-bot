@@ -21,4 +21,4 @@ Nine bugs found across the codebase, ranging from a user-visible message failure
 
 | # | Severity | File | Status | Summary |
 |---|----------|------|--------|---------|
-| 7 | Low | `knowledger/bot.py` | 🔧 In review (PR link pending) | [/inqueue filenames break Markdown rendering](inqueue-markdown-italics.md) |
+| 7 | Low | `knowledger/bot.py` | 🔧 [In review](https://github.com/guidodinello/knowledger-bot/pull/47) | [/inqueue filenames break Markdown rendering](inqueue-markdown-italics.md) |
