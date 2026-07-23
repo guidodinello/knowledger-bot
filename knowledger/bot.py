@@ -202,7 +202,7 @@ async def cmd_inqueue(update: Update, context: CustomContext, user: User) -> Non
 
     queue: Queue = context.bot_data["queue"]
     entries = queue.peek()
-    lines.append("petition_queue.json (retry/upload queue)")
+    lines.append("`petition_queue.json` (retry/upload queue)")
     if entries:
         for e in entries:
             status = "pending" if e.state == "pending" else "in_flight"
@@ -215,7 +215,7 @@ async def cmd_inqueue(update: Update, context: CustomContext, user: User) -> Non
     lines.append("")
 
     state_path = context.bot_data["config"].storage.data_dir / "poller_state.json"
-    lines.append("poller_state.json (seen + pending videos)")
+    lines.append("`poller_state.json` (seen + pending videos)")
     try:
         state = PollerState.load(state_path)
     except PersistenceError as e:
@@ -236,7 +236,7 @@ async def cmd_inqueue(update: Update, context: CustomContext, user: User) -> Non
 
     lines.append("")
 
-    lines.append("pending_transcripts.json (transcript fetches blocked, awaiting retry)")
+    lines.append("`pending_transcripts.json` (transcript fetches blocked, awaiting retry)")
     try:
         pending_transcripts = context.bot_data["pending_transcripts"].load()
     except PersistenceError as e:
