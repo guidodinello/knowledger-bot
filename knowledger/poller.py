@@ -23,7 +23,7 @@ from .config import Config, ProxyConfig
 from .logger import get_logger
 from .notify import notify
 from .persistence import CorruptDataError, PersistenceError, atomic_write_json, load_json
-from .queue import Queue, QueueEntry
+from .queue import Queue, build_auth_fallback_entry
 from .queue_processor import MAX_UPLOAD_ATTEMPTS
 from .transcript import TranscriptTransportError, TranscriptUnavailable, fetch_transcript
 from .upload_service import (
@@ -246,14 +246,13 @@ def _enqueue_auth_fallback(
     config: Config,
 ) -> None:
     """On token expiry, park the transcript in petition_queue.json so /refresh uploads it."""
-    entry = QueueEntry(
+    entry = build_auth_fallback_entry(
         project_id=project_id,
         video_id=video.video_id,
         file_name=file_name,
         transcript=transcript,
         chat_id=next(iter(config.telegram.allowed_user_ids), 0),
         video_title=video.title,
-        queued_at=datetime.now(UTC).isoformat(),
     )
     # Persistence failures propagate rather than being logged and swallowed — silently
     # discarding a fetched transcript here would lose it with no record it ever existed.

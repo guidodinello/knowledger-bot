@@ -15,18 +15,17 @@ the interactive flow and the poller.
 
 import asyncio
 from dataclasses import asdict, dataclass, field
-from datetime import UTC, datetime
 from pathlib import Path
 
+from curl_cffi.requests.exceptions import RequestException
 from telegram.ext import Application
 from telegram.helpers import escape_markdown
 
-from .claude_client import ClaudeClient
+from .claude_client import AuthError, ClaudeClient, Doc
 from .config import Config
 from .logger import get_logger
-from .notify import notify
 from .persistence import CorruptDataError, PersistenceError, atomic_write_json, load_json
-from .queue import Queue, QueueEntry
+from .queue import Queue, QueueEntry, build_auth_fallback_entry
 from .transcript import TranscriptTransportError, TranscriptUnavailable, fetch_transcript
 from .upload_service import (
     AlreadyExists,
@@ -70,11 +69,26 @@ class PendingTranscriptStore:
             raise CorruptDataError(self.path, f"malformed pending transcript entry: {e}") from e
 
     def add(self, entry: PendingTranscript) -> bool:
-        """Persist entry, deduped on project_id+video_id. Returns False (no write) if
-        already present — matches Queue.enqueue's dedup semantics."""
+        """Persist entry, deduped on project_id+video_id. If an existing entry for the
+        same video has a different ``overwrite_doc_uuid`` — the user's intent changed
+        between attempts, e.g. a plain upload became an overwrite — it is replaced
+        rather than silently dropped, since keeping the older intent would mean the
+        drain later resolves the wrong outcome. Returns False only when an entry with
+        the exact same intent is already queued."""
         entries = self.load()
-        if any(e.project_id == entry.project_id and e.video_id == entry.video_id for e in entries):
-            return False
+        existing = next(
+            (
+                e
+                for e in entries
+                if e.project_id == entry.project_id and e.video_id == entry.video_id
+            ),
+            None,
+        )
+        if existing is not None:
+            if existing.overwrite_doc_uuid == entry.overwrite_doc_uuid:
+                return False
+            self._save([entry if e is existing else e for e in entries])
+            return True
         self._save(entries + [entry])
         return True
 
@@ -90,32 +104,53 @@ class PendingTranscriptStore:
         atomic_write_json(self.path, [asdict(e) for e in entries])
 
 
-def _enqueue_auth_fallback(queue: Queue, entry: PendingTranscript, transcript: str) -> None:
+def _enqueue_auth_fallback(
+    queue: Queue,
+    entry: PendingTranscript,
+    transcript: str,
+) -> QueueEntry | None:
     """The retried fetch succeeded but the upload itself is now auth-blocked — hand
     the now-in-hand transcript to the existing petition_queue mechanism (same
-    fallback the poller and the interactive flow already use) rather than losing it."""
-    queue_entry = QueueEntry(
+    fallback the poller already uses) rather than losing it. Returns the persisted
+    entry, or None if this project_id+video_id was already queued (e.g. by an
+    earlier, still-unresolved auth failure for the same video) — the caller uses
+    this to tell the user whether this is newly queued or was already pending."""
+    queue_entry = build_auth_fallback_entry(
         project_id=entry.project_id,
         video_id=entry.video_id,
         file_name=entry.file_name,
         transcript=transcript,
         chat_id=entry.chat_id,
         video_title=entry.video_title,
-        queued_at=datetime.now(UTC).isoformat(),
         overwrite_doc_uuid=entry.overwrite_doc_uuid,
     )
     # Persistence failures propagate — silently discarding a fetched transcript here
     # would lose it with no record it ever existed.
-    queue.enqueue(queue_entry)
+    return queue.enqueue(queue_entry)
+
+
+async def _notify_chat(
+    app: Application, chat_id: int, text: str, *, parse_mode: str | None = None,
+) -> None:
+    """Best-effort: a failure here (e.g. this task's first tick racing the Telegram
+    Application's own startup initialization) must not be treated as the drain
+    itself failing — the transcript is already safely handled by this point, only
+    the user-facing confirmation would be missing."""
+    try:
+        await app.bot.send_message(chat_id, text, parse_mode=parse_mode)
+    except Exception:
+        logger.warning("Failed to notify chat %d", chat_id, exc_info=True)
 
 
 async def _drain_one(
     app: Application,
     config: Config,
+    client: ClaudeClient,
     service: TranscriptUploadService,
     queue: Queue,
     store: PendingTranscriptStore,
     entry: PendingTranscript,
+    docs_by_project: dict[str, list[Doc]],
 ) -> None:
     try:
         transcript = await asyncio.to_thread(
@@ -130,8 +165,36 @@ async def _drain_one(
     except TranscriptUnavailable:
         logger.info("No captions available for %s on retry; giving up", entry.video_id)
         store.remove(entry.project_id, entry.video_id)
-        await notify(app, config, f"⚠️ No captions available for “{entry.video_title}” — gave up.")
+        await _notify_chat(
+            app, entry.chat_id, f"⚠️ No captions available for “{entry.video_title}” — gave up.",
+        )
         return
+
+    # Cache doc listings per project for the whole batch — several pending entries
+    # commonly share a project_id (the same block affecting several requests), and
+    # TranscriptUploadService.upload() would otherwise re-list on every single call.
+    # Mirrors QueueProcessor._process_entry's identical batching.
+    if entry.project_id not in docs_by_project:
+        try:
+            docs_by_project[entry.project_id] = await asyncio.to_thread(
+                client.list_docs, entry.project_id,
+            )
+        except AuthError:
+            store.remove(entry.project_id, entry.video_id)
+            added = _enqueue_auth_fallback(queue, entry, transcript)
+            escaped = escape_markdown(entry.file_name, version=1)
+            msg = (
+                f"Token expired — *{escaped}* queued. Run /refresh after updating the token."
+                if added is not None
+                else f"Token expired — *{escaped}* was already queued."
+            )
+            await _notify_chat(app, entry.chat_id, msg, parse_mode="Markdown")
+            return
+        except RequestException:
+            logger.warning(
+                "Failed to list docs for project %s; will retry", entry.project_id, exc_info=True,
+            )
+            return
 
     outcome = await asyncio.to_thread(
         service.upload,
@@ -139,6 +202,7 @@ async def _drain_one(
         transcript,
         entry.file_name,
         overwrite_doc_uuid=entry.overwrite_doc_uuid,
+        docs=docs_by_project[entry.project_id],
     )
     match outcome:
         case Uploaded():
@@ -147,7 +211,8 @@ async def _drain_one(
                 "Retried upload succeeded: %s -> project %s", entry.file_name, entry.project_id,
             )
             escaped = escape_markdown(entry.file_name, version=1)
-            await app.bot.send_message(
+            await _notify_chat(
+                app,
                 entry.chat_id,
                 f"Transcript request unblocked — saved *{escaped}* to project.",
                 parse_mode="Markdown",
@@ -157,13 +222,14 @@ async def _drain_one(
             store.remove(entry.project_id, entry.video_id)
         case DeferredForAuth():
             store.remove(entry.project_id, entry.video_id)
-            _enqueue_auth_fallback(queue, entry, transcript)
+            added = _enqueue_auth_fallback(queue, entry, transcript)
             escaped = escape_markdown(entry.file_name, version=1)
-            await app.bot.send_message(
-                entry.chat_id,
-                f"Token expired — *{escaped}* queued. Run /refresh after updating the token.",
-                parse_mode="Markdown",
+            msg = (
+                f"Token expired — *{escaped}* queued. Run /refresh after updating the token."
+                if added is not None
+                else f"Token expired — *{escaped}* was already queued."
             )
+            await _notify_chat(app, entry.chat_id, msg, parse_mode="Markdown")
         case RetryPending(step=step, error=error):
             logger.warning(
                 "Retried upload failed for %s while %s: %s; will retry",
@@ -181,8 +247,9 @@ async def drain_pending_transcripts(
     store: PendingTranscriptStore,
 ) -> None:
     service = TranscriptUploadService(client)
+    docs_by_project: dict[str, list[Doc]] = {}
     for entry in store.load():
-        await _drain_one(app, config, service, queue, store, entry)
+        await _drain_one(app, config, client, service, queue, store, entry, docs_by_project)
 
 
 async def run_pending_transcript_retrier(app: Application, config: Config) -> None:

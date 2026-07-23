@@ -245,7 +245,7 @@ async def cmd_inqueue(update: Update, context: CustomContext, user: User) -> Non
     else:
         if pending_transcripts:
             for t in pending_transcripts:
-                title = escape_markdown(t.video_title or t.file_name, version=1)
+                title = escape_markdown(t.video_title, version=1)
                 lines.append(f"• {title}")
         else:
             lines.append("(empty)")
