@@ -27,7 +27,7 @@ QUEUE_FILE = "petition_queue.json"
 PENDING_TRANSCRIPTS_FILE = "pending_transcripts.json"
 
 
-def _backfill(path: Path, entries: list[dict], *, dry_run: bool) -> int:
+def _backfill(path: Path, entries: list[dict[str, object]], *, dry_run: bool) -> int:
     patched = [e for e in entries if "channel_name" not in e]
     if not patched:
         print(f"{path}: already up to date, nothing to do")

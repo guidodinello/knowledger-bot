@@ -271,7 +271,7 @@ async def cmd_inqueue(update: Update, context: CustomContext, user: User) -> Non
 
     lines.append("")
 
-    # 📥 Blocked transcripts — PendingTranscript: no upload_attempts, no channel, no
+    # 📥 Blocked transcripts — PendingTranscript: has channel_name, no upload_attempts, no
     # /refresh hint (drained automatically by the periodic retrier, not by /refresh).
     lines.append("📥 Blocked transcripts")
     try:
@@ -284,7 +284,8 @@ async def cmd_inqueue(update: Update, context: CustomContext, user: User) -> Non
             lines[-1] += f" — {len(pending_transcripts)} blocked"
             entry_lines = [
                 [
-                    f"• {escape_markdown(t.video_title, version=1)}",
+                    f"• {escape_markdown(t.video_title, version=1)}"
+                    f" — {escape_markdown(t.channel_name, version=1)}",
                     f"  queued {_fmt_ts(t.queued_at)}",
                 ]
                 for t in pending_transcripts

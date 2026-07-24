@@ -118,6 +118,14 @@ class WeeklyRecapSettings:
     day: str = "FRI"  # 3-letter code from DAY_CODES, UTC
     hour: int = 18  # UTC
 
+    def __post_init__(self) -> None:
+        if self.day not in DAY_CODES:
+            raise ValueError(
+                f"WEEKLY_RECAP_DAY must be one of {sorted(DAY_CODES)}, got {self.day!r}",
+            )
+        if not 0 <= self.hour <= 23:
+            raise ValueError(f"WEEKLY_RECAP_HOUR must be between 0 and 23, got {self.hour}")
+
 
 @dataclass(frozen=True, slots=True)
 class Config:
@@ -182,21 +190,16 @@ def load_config() -> Config:
         "on",
     }
 
-    raw_recap_day = os.getenv("WEEKLY_RECAP_DAY", "FRI").strip().upper()
-    if raw_recap_day not in DAY_CODES:
-        raise ValueError(
-            f"WEEKLY_RECAP_DAY must be one of {sorted(DAY_CODES)}, got {raw_recap_day!r}",
-        )
+    recap_defaults = WeeklyRecapSettings()
+    raw_recap_day = os.getenv("WEEKLY_RECAP_DAY", recap_defaults.day).strip().upper()
 
     raw_recap_hour = os.getenv("WEEKLY_RECAP_HOUR")
-    recap_hour = 18
+    recap_hour = recap_defaults.hour
     if raw_recap_hour:
         try:
             recap_hour = int(raw_recap_hour)
         except ValueError as e:
             raise ValueError("WEEKLY_RECAP_HOUR must be an integer") from e
-    if not 0 <= recap_hour <= 23:
-        raise ValueError(f"WEEKLY_RECAP_HOUR must be between 0 and 23, got {recap_hour}")
 
     raw_log_file = os.getenv("LOG_FILE")
     raw_log_level = os.getenv("LOG_LEVEL")
