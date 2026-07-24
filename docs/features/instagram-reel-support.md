@@ -1,5 +1,6 @@
 # Feature: Instagram Reel support
 
+**Status:** Implemented — [PR #32](https://github.com/guidodinello/knowledger-bot/pull/32).
 **Value:** Low–Medium (occasional manual use, not a bot workflow)
 **Effort:** Low
 **Touches:** `scripts/transcribe.py`, `scripts/transcribe.sh` (docs only)
