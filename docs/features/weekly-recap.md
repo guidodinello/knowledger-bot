@@ -1,6 +1,6 @@
 # Feature: Weekly Upload Recap
 
-**Status:** Proposed.
+**Status:** Implemented — [PR #49](https://github.com/guidodinello/knowledger-bot/pull/49).
 **Value:** Medium (visibility into what landed in each project before the weekend
 analysis session)
 **Effort:** Medium
