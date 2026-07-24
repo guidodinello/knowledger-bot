@@ -3,7 +3,8 @@
 Runs as an in-process asyncio task inside the bot (see ``main.py``). Every
 ``config.poller.poll_interval`` seconds it polls each channel's Atom feed, enqueues
 newly published videos, and once a video is 24h old fetches its transcript and uploads
-it as a doc into ``config.poller.auto_transcript_project`` — reusing the shared
+it as a doc into ``config.poller.auto_transcript_project`` (or a channel's own
+``project`` override in ``channels.json``) — reusing the shared
 ``TranscriptUploadService`` and the ``Queue`` auth-fallback.
 """
 
@@ -59,6 +60,7 @@ class Channel:
     handle: str  # e.g. "@NeuronaFinanciera"
     name: str
     channel_id: str | None = None
+    project: str | None = None  # overrides PollerSettings.auto_transcript_project; name or uuid
 
 
 @dataclass(frozen=True, slots=True)
@@ -77,14 +79,15 @@ class PollerState:
     path: Path
     seen: set[str] = field(default_factory=set)
     pending: list[PendingVideo] = field(default_factory=list)
+    baseline_seeded: set[str] = field(default_factory=set)  # channel_ids already baseline-seeded
     auth_error_notified: bool = False  # in-memory only; not persisted to disk
 
     @classmethod
     def load(cls, path: Path) -> "PollerState":
         """Load state. A missing file is a valid first-run/empty state. A corrupt or
         unreadable existing file fails closed (raises) instead of silently resetting —
-        that would re-run first-run baseline seeding and re-detect every pending video
-        as brand new."""
+        that would re-run baseline seeding for every channel and re-detect every
+        pending video as brand new."""
         raw = load_json(path)
         if raw is None:
             return cls(path=path)
@@ -93,12 +96,21 @@ class PollerState:
                 path=path,
                 seen=set(raw["seen"]),
                 pending=[PendingVideo(**p) for p in raw["pending"]],
+                # Missing key: pre-existing state file from before per-channel baseline
+                # seeding existed. Defaulting to empty re-seeds every channel it's
+                # already tracking exactly once after upgrading, which is harmless —
+                # baseline seeding only adds already-`seen` video ids back to `seen`.
+                baseline_seeded=set(raw.get("baseline_seeded", [])),
             )
         except (KeyError, TypeError) as e:
             raise CorruptDataError(path, f"malformed poller state: {e}") from e
 
     def save(self) -> None:
-        payload = {"seen": sorted(self.seen), "pending": [asdict(v) for v in self.pending]}
+        payload = {
+            "seen": sorted(self.seen),
+            "pending": [asdict(v) for v in self.pending],
+            "baseline_seeded": sorted(self.baseline_seeded),
+        }
         atomic_write_json(self.path, payload)
 
 
@@ -208,8 +220,10 @@ def _resolve_missing_ids(channels: list[Channel], path: Path, proxy: ProxyConfig
 
 
 def _baseline_seed(channels: list[Channel], state: PollerState, proxy: ProxyConfig | None) -> None:
-    """First-run only: mark every current feed video as seen WITHOUT enqueueing it, so the
-    poller only ever processes videos published after it starts (no back-catalogue storm)."""
+    """Mark every current feed video of the given channels as seen WITHOUT enqueueing it,
+    so the poller only ever processes videos published after a channel starts being
+    watched (no back-catalogue storm). Called both on first run (all channels) and
+    whenever a channel is newly added to channels.json (just that channel)."""
     for ch in channels:
         if not ch.channel_id:
             continue
@@ -408,11 +422,19 @@ class TranscriptPoller:
         if not self._state.pending:
             return
 
-        # 2. Resolve the target project once per tick (cached on the client).
+        # 2. Resolve each distinct configured project name once per tick (cached on
+        # the client), then map each channel to its resolved project id. A channel
+        # with no `project` override falls back to the global default.
+        channel_project_name = {
+            ch.channel_id: ch.project or self._project_name
+            for ch in self._channels
+            if ch.channel_id
+        }
+        project_names = set(channel_project_name.values()) | {self._project_name}
         try:
-            project_id = await asyncio.to_thread(_resolve_project, self._client, self._project_name)
+            project_ids = await self._resolve_project_ids(project_names)
         except AuthError:
-            logger.warning("Auth error resolving project; skipping processing this tick")
+            logger.warning("Auth error resolving projects; skipping processing this tick")
             if not self._state.auth_error_notified:
                 self._state.auth_error_notified = True
                 await notify(
@@ -429,8 +451,6 @@ class TranscriptPoller:
                 self._config,
                 "✅ Claude session token restored — poller resumed.",
             )
-        if project_id is None:
-            return
 
         # 3. Process every pending video whose publish time is at least UPLOAD_DELAY
         # ago. Persist after each video so a crash/exception mid-batch can't discard
@@ -444,6 +464,13 @@ class TranscriptPoller:
             if now - datetime.fromisoformat(video.published) < UPLOAD_DELAY:
                 settled.append(video)
                 continue
+            project_name = channel_project_name.get(video.channel_id, self._project_name)
+            project_id = project_ids.get(project_name)
+            if project_id is None:
+                # Misconfigured project name (typo, wrong org) — leave it pending,
+                # don't drop it; _resolve_project already logged the error.
+                settled.append(video)
+                continue
             result = await self._process_video(project_id, video, now)
             if result is not None:
                 settled.append(result)
@@ -451,6 +478,16 @@ class TranscriptPoller:
             self._state.save()
         self._state.pending = settled
         self._state.save()
+
+    async def _resolve_project_ids(self, project_names: set[str]) -> dict[str, str | None]:
+        """One _resolve_project (and thus one Claude API round trip, cached at the
+        client level) per distinct configured project name, not per channel or per
+        video. The first call surfaces AuthError if the token is bad; later calls in
+        the same tick hit the client's cached project list."""
+        return {
+            name: await asyncio.to_thread(_resolve_project, self._client, name)
+            for name in project_names
+        }
 
     async def run(self) -> None:
         logger.info(
@@ -497,10 +534,13 @@ async def run_poller(app: Application, config: Config) -> None:
 
     config.storage.data_dir.mkdir(parents=True, exist_ok=True)
     state_path = config.storage.data_dir / "poller_state.json"
-    first_run = not state_path.exists()
     state = PollerState.load(state_path)
-    if first_run:
-        await asyncio.to_thread(_baseline_seed, channels, state, config.transcript.proxy)
+    unseeded = [
+        ch for ch in channels if ch.channel_id and ch.channel_id not in state.baseline_seeded
+    ]
+    if unseeded:
+        await asyncio.to_thread(_baseline_seed, unseeded, state, config.transcript.proxy)
+        state.baseline_seeded.update(ch.channel_id for ch in unseeded if ch.channel_id)
         state.save()
 
     poller = TranscriptPoller(app, config, client, queue, channels, state, project_name)

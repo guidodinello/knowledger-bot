@@ -1,6 +1,6 @@
 # Feature: Per-Channel Claude Project + Per-Channel Baseline Seeding
 
-**Status:** Proposed.
+**Status:** In review — [PR TBD](TBD)
 **Value:** Medium (unblocks using the poller across unrelated topics — investments vs.
 exercise vs. whatever's next — instead of one project for every watched channel)
 **Effort:** Medium
