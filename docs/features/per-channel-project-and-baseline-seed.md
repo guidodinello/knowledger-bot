@@ -1,6 +1,6 @@
 # Feature: Per-Channel Claude Project + Per-Channel Baseline Seeding
 
-**Status:** In review — [PR TBD](TBD)
+**Status:** In review — [PR #50](https://github.com/guidodinello/knowledger-bot/pull/50)
 **Value:** Medium (unblocks using the poller across unrelated topics — investments vs.
 exercise vs. whatever's next — instead of one project for every watched channel)
 **Effort:** Medium

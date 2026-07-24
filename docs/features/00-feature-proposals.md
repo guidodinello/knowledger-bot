@@ -18,5 +18,5 @@
 | Feature | Status | Summary |
 |---------|--------|---------|
 | [Instagram Reel support](instagram-reel-support.md) | ⬜ Proposed | Extend `scripts/transcribe.py` (offline, manual) to download Instagram Reels via yt-dlp cookies auth and transcribe with faster-whisper. Feasibility: low-effort but manual-only — no caption API, no bot/poller integration. |
-| [Per-channel Claude project + baseline seeding](per-channel-project-and-baseline-seed.md) | 🔧 In review — [PR TBD](TBD) | Lets each watched YouTube channel target its own Claude project (investments vs. exercise, etc.) instead of one global project, and seeds new channels without flooding their back-catalogue |
+| [Per-channel Claude project + baseline seeding](per-channel-project-and-baseline-seed.md) | 🔧 In review — [PR #50](https://github.com/guidodinello/knowledger-bot/pull/50) | Lets each watched YouTube channel target its own Claude project (investments vs. exercise, etc.) instead of one global project, and seeds new channels without flooding their back-catalogue |
 | [Weekly upload recap](weekly-recap.md) | ⬜ Proposed | Sunday summary of what the poller auto-transcribed and uploaded that week, per project |
