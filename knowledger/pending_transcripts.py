@@ -15,6 +15,7 @@ the interactive flow and the poller.
 
 import asyncio
 from dataclasses import asdict, dataclass, field
+from datetime import UTC, datetime
 from pathlib import Path
 
 from curl_cffi.requests.exceptions import RequestException
@@ -23,6 +24,7 @@ from telegram.helpers import escape_markdown
 
 from .claude_client import AuthError, ClaudeClient, Doc
 from .config import Config
+from .history import UploadRecord, record_upload
 from .logger import get_logger
 from .persistence import CorruptDataError, PersistenceError, atomic_write_json, load_json
 from .queue import Queue, QueueEntry, build_auth_fallback_entry
@@ -46,6 +48,7 @@ class PendingTranscript:
     file_name: str
     video_title: str
     queued_at: str  # ISO-8601, for display only
+    channel_name: str  # for the weekly recap; required — see scripts/backfill_channel_name.py
     overwrite_doc_uuid: str | None = None  # set for a blocked overwrite retry
 
 
@@ -66,7 +69,12 @@ class PendingTranscriptStore:
         try:
             return [PendingTranscript(**p) for p in raw]
         except TypeError as e:
-            raise CorruptDataError(self.path, f"malformed pending transcript entry: {e}") from e
+            raise CorruptDataError(
+                self.path,
+                f"malformed pending transcript entry: {e} — if this is a missing "
+                "channel_name on an entry from before that field existed, run "
+                "scripts/backfill_channel_name.py against this DATA_DIR",
+            ) from e
 
     def add(self, entry: PendingTranscript) -> bool:
         """Persist entry, deduped on project_id+video_id. If an existing entry for the
@@ -122,6 +130,7 @@ def _enqueue_auth_fallback(
         transcript=transcript,
         chat_id=entry.chat_id,
         video_title=entry.video_title,
+        channel_name=entry.channel_name,
         overwrite_doc_uuid=entry.overwrite_doc_uuid,
     )
     # Persistence failures propagate — silently discarding a fetched transcript here
@@ -130,7 +139,11 @@ def _enqueue_auth_fallback(
 
 
 async def _notify_chat(
-    app: Application, chat_id: int, text: str, *, parse_mode: str | None = None,
+    app: Application,
+    chat_id: int,
+    text: str,
+    *,
+    parse_mode: str | None = None,
 ) -> None:
     """Best-effort: a failure here (e.g. this task's first tick racing the Telegram
     Application's own startup initialization) must not be treated as the drain
@@ -166,7 +179,9 @@ async def _drain_one(
         logger.info("No captions available for %s on retry; giving up", entry.video_id)
         store.remove(entry.project_id, entry.video_id)
         await _notify_chat(
-            app, entry.chat_id, f"⚠️ No captions available for “{entry.video_title}” — gave up.",
+            app,
+            entry.chat_id,
+            f"⚠️ No captions available for “{entry.video_title}” — gave up.",
         )
         return
 
@@ -177,7 +192,8 @@ async def _drain_one(
     if entry.project_id not in docs_by_project:
         try:
             docs_by_project[entry.project_id] = await asyncio.to_thread(
-                client.list_docs, entry.project_id,
+                client.list_docs,
+                entry.project_id,
             )
         except AuthError:
             store.remove(entry.project_id, entry.video_id)
@@ -192,7 +208,9 @@ async def _drain_one(
             return
         except RequestException:
             logger.warning(
-                "Failed to list docs for project %s; will retry", entry.project_id, exc_info=True,
+                "Failed to list docs for project %s; will retry",
+                entry.project_id,
+                exc_info=True,
             )
             return
 
@@ -208,7 +226,19 @@ async def _drain_one(
         case Uploaded():
             store.remove(entry.project_id, entry.video_id)
             logger.info(
-                "Retried upload succeeded: %s -> project %s", entry.file_name, entry.project_id,
+                "Retried upload succeeded: %s -> project %s",
+                entry.file_name,
+                entry.project_id,
+            )
+            record_upload(
+                config.storage.data_dir,
+                UploadRecord(
+                    project_id=entry.project_id,
+                    file_name=entry.file_name,
+                    video_title=entry.video_title,
+                    channel_name=entry.channel_name,
+                    uploaded_at=datetime.now(UTC).isoformat(),
+                ),
             )
             escaped = escape_markdown(entry.file_name, version=1)
             await _notify_chat(

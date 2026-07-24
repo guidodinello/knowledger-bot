@@ -106,6 +106,27 @@ class StorageSettings:
     data_dir: Path = field(default_factory=lambda: Path("."))
 
 
+# Single source of truth for the weekly recap's day-code -> UTC weekday mapping —
+# used both to validate WEEKLY_RECAP_DAY here and to compute the next occurrence in
+# weekly_recap.py.
+DAY_CODES = {"MON": 0, "TUE": 1, "WED": 2, "THU": 3, "FRI": 4, "SAT": 5, "SUN": 6}
+
+
+@dataclass(frozen=True, slots=True)
+class WeeklyRecapSettings:
+    enabled: bool = False
+    day: str = "FRI"  # 3-letter code from DAY_CODES, UTC
+    hour: int = 18  # UTC
+
+    def __post_init__(self) -> None:
+        if self.day not in DAY_CODES:
+            raise ValueError(
+                f"WEEKLY_RECAP_DAY must be one of {sorted(DAY_CODES)}, got {self.day!r}",
+            )
+        if not 0 <= self.hour <= 23:
+            raise ValueError(f"WEEKLY_RECAP_HOUR must be between 0 and 23, got {self.hour}")
+
+
 @dataclass(frozen=True, slots=True)
 class Config:
     telegram: TelegramSettings
@@ -115,6 +136,7 @@ class Config:
     token_server: TokenServerSettings = field(default_factory=TokenServerSettings)
     poller: PollerSettings = field(default_factory=PollerSettings)
     storage: StorageSettings = field(default_factory=StorageSettings)
+    weekly_recap: WeeklyRecapSettings = field(default_factory=WeeklyRecapSettings)
 
 
 def load_config() -> Config:
@@ -161,6 +183,24 @@ def load_config() -> Config:
         except ValueError as e:
             raise ValueError("POLL_INTERVAL_SECONDS must be an integer") from e
 
+    weekly_recap_enabled = os.getenv("WEEKLY_RECAP_ENABLED", "").strip().lower() in {
+        "1",
+        "true",
+        "yes",
+        "on",
+    }
+
+    recap_defaults = WeeklyRecapSettings()
+    raw_recap_day = os.getenv("WEEKLY_RECAP_DAY", recap_defaults.day).strip().upper()
+
+    raw_recap_hour = os.getenv("WEEKLY_RECAP_HOUR")
+    recap_hour = recap_defaults.hour
+    if raw_recap_hour:
+        try:
+            recap_hour = int(raw_recap_hour)
+        except ValueError as e:
+            raise ValueError("WEEKLY_RECAP_HOUR must be an integer") from e
+
     raw_log_file = os.getenv("LOG_FILE")
     raw_log_level = os.getenv("LOG_LEVEL")
     logger_defaults = LoggerConfig()
@@ -196,5 +236,10 @@ def load_config() -> Config:
             poll_interval=poll_interval,
         ),
         storage=StorageSettings(data_dir=data_dir),
+        weekly_recap=WeeklyRecapSettings(
+            enabled=weekly_recap_enabled,
+            day=raw_recap_day,
+            hour=recap_hour,
+        ),
         logger=logger_config,
     )

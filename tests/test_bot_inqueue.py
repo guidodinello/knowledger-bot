@@ -83,6 +83,7 @@ def test_inqueue_shows_counts_stuck_marker_and_caps_long_lists(tmp_path: Path) -
                 chat_id=1,
                 video_title=f"Title {i}",
                 queued_at="2026-07-17T09:12:00+00:00",
+                channel_name=f"Channel {i}",
                 upload_attempts=4 if i == 0 else 0,
             )
         )

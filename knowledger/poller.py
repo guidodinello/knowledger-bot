@@ -20,6 +20,7 @@ from telegram.ext import Application
 
 from .claude_client import AuthError, ClaudeClient
 from .config import Config, ProxyConfig
+from .history import UploadRecord, record_upload
 from .logger import get_logger
 from .notify import notify
 from .persistence import CorruptDataError, PersistenceError, atomic_write_json, load_json
@@ -253,6 +254,7 @@ def _enqueue_auth_fallback(
         transcript=transcript,
         chat_id=next(iter(config.telegram.allowed_user_ids), 0),
         video_title=video.title,
+        channel_name=video.channel_name,
     )
     # Persistence failures propagate rather than being logged and swallowed — silently
     # discarding a fetched transcript here would lose it with no record it ever existed.
@@ -326,6 +328,16 @@ class TranscriptPoller:
             case Uploaded():
                 logger.info("Auto-uploaded %s to project %s", file_name, project_id)
                 self._queue.remove(project_id, video.video_id)
+                record_upload(
+                    self._config.storage.data_dir,
+                    UploadRecord(
+                        project_id=project_id,
+                        file_name=file_name,
+                        video_title=video.title,
+                        channel_name=video.channel_name,
+                        uploaded_at=datetime.now(UTC).isoformat(),
+                    ),
+                )
                 await notify(self._app, self._config, f"✅ Auto-uploaded “{file_name}”")
                 return None
             case AlreadyExists():

@@ -21,6 +21,7 @@ cookies.txt
 # Runtime state
 poller_state.json
 petition_queue.json
+upload_history.json
 /data/
 *.tmp
 

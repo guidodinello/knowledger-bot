@@ -25,6 +25,7 @@ class QueueEntry:
     chat_id: int
     video_title: str
     queued_at: str  # ISO-8601, for display only
+    channel_name: str  # for the weekly recap; required — see scripts/backfill_channel_name.py
     upload_attempts: int = 0  # consecutive non-auth retry failures, for the stuck-entry alert
     overwrite_doc_uuid: str | None = None  # set for an overwrite retry: delete this doc first
     id: str = ""  # assigned by Queue.enqueue(); empty only before first persistence
@@ -148,7 +149,12 @@ class Queue:
         try:
             return [QueueEntry(**item) for item in raw["entries"]]
         except (KeyError, TypeError) as e:
-            raise CorruptDataError(self.path, f"malformed queue entry: {e}") from e
+            raise CorruptDataError(
+                self.path,
+                f"malformed queue entry: {e} — if this is a missing channel_name on an "
+                "entry from before that field existed, run "
+                "scripts/backfill_channel_name.py against this DATA_DIR",
+            ) from e
 
     def _save(self, entries: list[QueueEntry]) -> None:
         payload = {"version": SCHEMA_VERSION, "entries": [asdict(e) for e in entries]}
@@ -163,6 +169,7 @@ def build_auth_fallback_entry(
     transcript: str,
     chat_id: int,
     video_title: str,
+    channel_name: str,
     overwrite_doc_uuid: str | None = None,
 ) -> QueueEntry:
     """Build a QueueEntry for the auth-fallback path: upload hit AuthError but a
@@ -177,5 +184,6 @@ def build_auth_fallback_entry(
         chat_id=chat_id,
         video_title=video_title,
         queued_at=datetime.now(UTC).isoformat(),
+        channel_name=channel_name,
         overwrite_doc_uuid=overwrite_doc_uuid,
     )

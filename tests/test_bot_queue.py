@@ -8,7 +8,13 @@ from telegram.ext import Application
 
 from knowledger.bot import drain_queue
 from knowledger.claude_client import AuthError, ClaudeClient
-from knowledger.config import ClaudeSettings, Config, LoggerConfig, TelegramSettings
+from knowledger.config import (
+    ClaudeSettings,
+    Config,
+    LoggerConfig,
+    StorageSettings,
+    TelegramSettings,
+)
 from knowledger.queue import Queue, QueueEntry
 from knowledger.queue_processor import MAX_UPLOAD_ATTEMPTS, DrainResult, QueueProcessor
 
@@ -72,11 +78,15 @@ async def _drain(
     )
 
 
-def _config() -> Config:
+def _config(data_dir: Path) -> Config:
+    # data_dir must point at tmp_path, not the default "." — record_upload() now
+    # writes upload_history.json as a side effect of a successful drain, and the
+    # default would otherwise write into the real repo working directory.
     return Config(
         logger=LoggerConfig(),
         telegram=TelegramSettings(bot_token="x", allowed_user_ids=frozenset({1})),
         claude=ClaudeSettings(session_token="x"),
+        storage=StorageSettings(data_dir=data_dir),
     )
 
 
@@ -89,6 +99,7 @@ def _entry(video_id: str, file_name: str, project_id: str = "p", **overrides) ->
         "chat_id": 1,
         "video_title": "Title",
         "queued_at": "now",
+        "channel_name": "Ch",
         **overrides,
     }
     return QueueEntry(**fields)
@@ -100,7 +111,7 @@ def test_success_notifies_and_drops_entry(tmp_path: Path) -> None:
     client = FakeClaudeClient()
     app = FakeTelegramApp()
 
-    result = asyncio.run(_drain(app, _config(), client, queue))
+    result = asyncio.run(_drain(app, _config(tmp_path), client, queue))
 
     assert result.uploaded == 1
     assert queue.peek() == []
@@ -114,13 +125,13 @@ def test_auth_error_releases_silently_then_succeeds(tmp_path: Path) -> None:
     client.fail_auth_times = 1
     app = FakeTelegramApp()
 
-    result = asyncio.run(_drain(app, _config(), client, queue))
+    result = asyncio.run(_drain(app, _config(tmp_path), client, queue))
     assert result.failed_auth == 1
     assert len(queue.peek()) == 1
     assert queue.peek()[0].state == "pending"  # released, not lost
     assert app.bot.sent == []  # no message on auth failure
 
-    result = asyncio.run(_drain(app, _config(), client, queue))
+    result = asyncio.run(_drain(app, _config(tmp_path), client, queue))
     assert result.uploaded == 1
 
 
@@ -130,7 +141,7 @@ def test_alert_fires_once_at_threshold_then_recovers(tmp_path: Path) -> None:
     client = FakeClaudeClient()
     client.fail_upload_times = MAX_UPLOAD_ATTEMPTS
     app = FakeTelegramApp()
-    config = _config()
+    config = _config(tmp_path)
 
     for _ in range(MAX_UPLOAD_ATTEMPTS):
         asyncio.run(_drain(app, config, client, queue))
@@ -148,7 +159,7 @@ def test_overwrite_deletes_old_doc_then_uploads(tmp_path: Path) -> None:
     queue.enqueue(_entry("v4", "f4", transcript="new", overwrite_doc_uuid="old-uuid"))
     app = FakeTelegramApp()
 
-    result = asyncio.run(_drain(app, _config(), client, queue))
+    result = asyncio.run(_drain(app, _config(tmp_path), client, queue))
 
     assert result.uploaded == 1
     assert client.docs["p"] == [{"uuid": "u1", "file_name": "f4"}]
@@ -162,7 +173,7 @@ def test_overwrite_retry_after_delete_already_landed_is_idempotent(tmp_path: Pat
     queue.enqueue(_entry("v5", "f5", overwrite_doc_uuid="already-gone-uuid"))
     app = FakeTelegramApp()
 
-    result = asyncio.run(_drain(app, _config(), client, queue))
+    result = asyncio.run(_drain(app, _config(tmp_path), client, queue))
 
     assert result.uploaded == 1
 
@@ -178,7 +189,7 @@ def test_overwrite_retry_after_lost_confirmation_is_not_duplicated(tmp_path: Pat
     app = FakeTelegramApp()
 
     calls_before = client.upload_calls
-    result = asyncio.run(_drain(app, _config(), client, queue))
+    result = asyncio.run(_drain(app, _config(tmp_path), client, queue))
 
     assert result.already_existed == 1
     assert client.upload_calls == calls_before
@@ -196,7 +207,7 @@ def test_transient_list_docs_failure_releases_overwrite_without_skipping_delete(
     client.fail_list_times = 1
     queue.enqueue(_entry("v7", "f7", overwrite_doc_uuid="still-there"))
     app = FakeTelegramApp()
-    config = _config()
+    config = _config(tmp_path)
 
     result = asyncio.run(_drain(app, config, client, queue))
     assert result.failed_other == 1
@@ -220,8 +231,8 @@ def test_two_concurrent_drains_upload_an_entry_once(tmp_path: Path) -> None:
 
     async def _run_both() -> tuple:
         return await asyncio.gather(
-            processor.drain(cast(Application, app), _config(), cast(ClaudeClient, client)),
-            processor.drain(cast(Application, app), _config(), cast(ClaudeClient, client)),
+            processor.drain(cast(Application, app), _config(tmp_path), cast(ClaudeClient, client)),
+            processor.drain(cast(Application, app), _config(tmp_path), cast(ClaudeClient, client)),
         )
 
     results = asyncio.run(_run_both())
@@ -256,7 +267,7 @@ def test_release_failure_propagates_and_does_not_lose_other_entries(tmp_path: Pa
     app = FakeTelegramApp()
 
     with pytest.raises(OSError):
-        asyncio.run(_drain(app, _config(), client, queue))
+        asyncio.run(_drain(app, _config(tmp_path), client, queue))
 
     # Nothing was lost: A is still claimed (in_flight) as of the crash, B untouched.
     remaining = {e.video_id: e for e in queue.peek()}
@@ -265,7 +276,7 @@ def test_release_failure_propagates_and_does_not_lose_other_entries(tmp_path: Pa
     # A fresh drain recovers the abandoned claim and both entries eventually succeed.
     queue.recover_abandoned()
     client.fail_auth_times = 0
-    result = asyncio.run(_drain(app, _config(), client, queue))
+    result = asyncio.run(_drain(app, _config(tmp_path), client, queue))
     assert result.uploaded == 2
 
 
