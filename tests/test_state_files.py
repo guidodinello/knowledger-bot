@@ -98,6 +98,28 @@ def test_poller_state_malformed_schema_fails_closed(tmp_path: Path) -> None:
         PollerState.load(path)
 
 
+def test_poller_state_round_trips_baseline_seeded(tmp_path: Path) -> None:
+    path = tmp_path / "state.json"
+    state = PollerState(path=path, baseline_seeded={"chan-a", "chan-b"})
+    state.save()
+
+    loaded = PollerState.load(path)
+
+    assert loaded.baseline_seeded == {"chan-a", "chan-b"}
+
+
+def test_poller_state_missing_baseline_seeded_key_defaults_empty(tmp_path: Path) -> None:
+    """A pre-upgrade state file has no `baseline_seeded` key at all — must load as an
+    empty set rather than failing closed, so existing channels get re-seeded once
+    (harmlessly) instead of the whole state file being rejected."""
+    path = tmp_path / "state.json"
+    path.write_text(json.dumps({"seen": ["a"], "pending": []}))
+
+    loaded = PollerState.load(path)
+
+    assert loaded.baseline_seeded == set()
+
+
 def test_channels_missing_file_is_empty(tmp_path: Path) -> None:
     assert load_channels(tmp_path / "channels.json") == []
 
@@ -114,6 +136,13 @@ def test_channels_valid_file_loads(tmp_path: Path) -> None:
     path.write_text(json.dumps([{"handle": "@x", "name": "X"}]))
     channels = load_channels(path)
     assert channels == [Channel(handle="@x", name="X")]
+
+
+def test_channels_valid_file_loads_with_project_override(tmp_path: Path) -> None:
+    path = tmp_path / "channels.json"
+    path.write_text(json.dumps([{"handle": "@x", "name": "X", "project": "Exercise"}]))
+    channels = load_channels(path)
+    assert channels == [Channel(handle="@x", name="X", project="Exercise")]
 
 
 if __name__ == "__main__":
