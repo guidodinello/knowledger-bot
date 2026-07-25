@@ -13,6 +13,7 @@ import re
 from dataclasses import asdict, dataclass, field, replace
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
+from typing import cast
 
 from curl_cffi import requests
 from curl_cffi.requests.exceptions import RequestException
@@ -549,7 +550,7 @@ async def run_poller(app: Application, config: Config) -> None:
     ]
     if unseeded:
         await asyncio.to_thread(_baseline_seed, unseeded, state, config.transcript.proxy)
-        state.baseline_seeded.update(ch.channel_id for ch in unseeded)
+        state.baseline_seeded.update(cast(str, ch.channel_id) for ch in unseeded)
         state.save()
 
     poller = TranscriptPoller(app, config, client, queue, channels, state, project_name)
