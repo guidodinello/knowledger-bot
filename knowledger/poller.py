@@ -130,7 +130,14 @@ def load_channels(path: Path) -> list[Channel]:
 
 
 def _save_channels(path: Path, channels: list[Channel]) -> None:
-    atomic_write_json(path, [asdict(c) for c in channels])
+    # Convert to dicts and remove project field if None to avoid writing "project": null
+    channel_dicts = []
+    for c in channels:
+        d = asdict(c)
+        if d["project"] is None:
+            del d["project"]
+        channel_dicts.append(d)
+    atomic_write_json(path, channel_dicts)
 
 
 def _proxies(proxy: ProxyConfig | None) -> dict[str, str] | None:
@@ -430,7 +437,7 @@ class TranscriptPoller:
             for ch in self._channels
             if ch.channel_id
         }
-        project_names = set(channel_project_name.values()) | {self._project_name}
+        project_names = set(channel_project_name.values())
         try:
             project_ids = await self._resolve_project_ids(project_names)
         except AuthError:
@@ -464,7 +471,7 @@ class TranscriptPoller:
             if now - datetime.fromisoformat(video.published) < UPLOAD_DELAY:
                 settled.append(video)
                 continue
-            project_name = channel_project_name.get(video.channel_id, self._project_name)
+            project_name = channel_project_name[video.channel_id]
             project_id = project_ids.get(project_name)
             if project_id is None:
                 # Misconfigured project name (typo, wrong org) — leave it pending,
@@ -480,14 +487,16 @@ class TranscriptPoller:
         self._state.save()
 
     async def _resolve_project_ids(self, project_names: set[str]) -> dict[str, str | None]:
-        """One _resolve_project (and thus one Claude API round trip, cached at the
-        client level) per distinct configured project name, not per channel or per
-        video. The first call surfaces AuthError if the token is bad; later calls in
-        the same tick hit the client's cached project list."""
-        return {
-            name: await asyncio.to_thread(_resolve_project, self._client, name)
-            for name in project_names
-        }
+        """One _resolve_project call per distinct configured project name.
+        Each call hits the client's cached project list, so there's at most one
+        Claude API round trip total per tick."""
+        results = {}
+        for name in project_names:
+            try:
+                results[name] = await asyncio.to_thread(_resolve_project, self._client, name)
+            except AuthError:
+                raise  # let _tick() handle it
+        return results
 
     async def run(self) -> None:
         logger.info(
@@ -540,7 +549,7 @@ async def run_poller(app: Application, config: Config) -> None:
     ]
     if unseeded:
         await asyncio.to_thread(_baseline_seed, unseeded, state, config.transcript.proxy)
-        state.baseline_seeded.update(ch.channel_id for ch in unseeded if ch.channel_id)
+        state.baseline_seeded.update(ch.channel_id for ch in unseeded)
         state.save()
 
     poller = TranscriptPoller(app, config, client, queue, channels, state, project_name)
