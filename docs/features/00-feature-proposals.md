@@ -14,9 +14,10 @@
 | [Redesign `/inqueue` output for readability](inqueue-redesign.md) | Human section labels + emoji, counts in headers, absolute timestamps, per-section cap with a `+N more` trailer, and empty-section collapse. Ended up covering three sections (retry queue, poller pending, and blocked transcripts — the last one added after the spec was written), not the two in the original mockup. |
 | [Instagram Reel support](instagram-reel-support.md) | Extends `scripts/transcribe.py` (offline, manual) to download Instagram Reels via yt-dlp cookies auth and transcribe with faster-whisper, with a configurable `--language` flag replacing the old Spanish hardcode |
 | [Weekly upload recap](weekly-recap.md) | Sunday summary of what the poller auto-transcribed and uploaded that week, per project, backed by a new append-only `upload_history.json` |
+| [Per-channel Claude project + baseline seeding](per-channel-project-and-baseline-seed.md) | Lets each watched YouTube channel target its own Claude project (investments vs. exercise, etc.) instead of one global project, and seeds new channels without flooding their back-catalogue |
 
 ## Proposed / Not yet implemented
 
 | Feature | Status | Summary |
 |---------|--------|---------|
-| [Per-channel Claude project + baseline seeding](per-channel-project-and-baseline-seed.md) | ⬜ Proposed | Lets each watched YouTube channel target its own Claude project (investments vs. exercise, etc.) instead of one global project, and seeds new channels without flooding their back-catalogue |
+| [`/version` command](version-command.md) | ⬜ Proposed | Reports the git SHA and commit date of the running build, baked in at image build time, so production's actual version is visible from Telegram |
