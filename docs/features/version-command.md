@@ -1,6 +1,6 @@
 # Feature: `/version` Command
 
-**Status:** Proposed.
+**Status:** In review.
 **Value:** Low–Medium (answers "is the fix actually deployed?" without SSHing to the
 VPS)
 **Effort:** Low

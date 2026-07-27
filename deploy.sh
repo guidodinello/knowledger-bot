@@ -68,7 +68,7 @@ case "${1:-}" in
         ;;
     update)
         echo "Pulling latest code and rebuilding..."
-        $SSH "cd $REMOTE_DIR && git fetch origin && git reset --hard origin/main && docker build -t knowledger ."
+        $SSH "cd $REMOTE_DIR && git fetch origin && git reset --hard origin/main && docker build --build-arg GIT_SHA=\$(git rev-parse --short HEAD) --build-arg GIT_COMMIT_DATE=\$(git log -1 --format=%cI) -t knowledger ."
         echo "Recreating container..."
         recreate
         $SSH "docker logs --tail 20 knowledger"
