@@ -7,3 +7,5 @@
   → refined: [features/per-channel-project-and-baseline-seed.md](../features/per-channel-project-and-baseline-seed.md)
 - tmbn estaria bueno un weekly recap el sunday asi corro los transcript analysis y tengo visibilidad de que videos se transcribieron en la semana
   → refined: [features/weekly-recap.md](../features/weekly-recap.md)
+- add a /version command that prints the git commit hash and the date of the last commit, so we can know which version is running in production
+  → refined: [features/version-command.md](../features/version-command.md)
