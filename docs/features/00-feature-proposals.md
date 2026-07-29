@@ -1,6 +1,6 @@
 # Feature Proposals
 
-**Status legend:** ⬜ Proposed (unclaimed) · 🔧 In review (PR open, link in this table) · ✅ Implemented (merged)
+**Status legend:** ⬜ Proposed (unclaimed) · ✅ Implemented
 
 ## Implemented
 
@@ -15,9 +15,8 @@
 | [Instagram Reel support](instagram-reel-support.md) | Extends `scripts/transcribe.py` (offline, manual) to download Instagram Reels via yt-dlp cookies auth and transcribe with faster-whisper, with a configurable `--language` flag replacing the old Spanish hardcode |
 | [Weekly upload recap](weekly-recap.md) | Sunday summary of what the poller auto-transcribed and uploaded that week, per project, backed by a new append-only `upload_history.json` |
 | [Per-channel Claude project + baseline seeding](per-channel-project-and-baseline-seed.md) | Lets each watched YouTube channel target its own Claude project (investments vs. exercise, etc.) instead of one global project, and seeds new channels without flooding their back-catalogue |
+| [`/version` command](version-command.md) | Reports the git SHA and commit date of the running build, baked in at image build time, so production's actual version is visible from Telegram |
 
-## Proposed / Not yet implemented
+## Proposed
 
-| Feature | Status | Summary |
-|---------|--------|---------|
-| [`/version` command](version-command.md) | 🔧 In review ([#53](https://github.com/guidodinello/knowledger-bot/pull/53)) | Reports the git SHA and commit date of the running build, baked in at image build time, so production's actual version is visible from Telegram |
+None.
