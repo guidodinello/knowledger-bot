@@ -20,4 +20,4 @@
 
 | Feature | Status | Summary |
 |---------|--------|---------|
-| [`/version` command](version-command.md) | ⬜ Proposed | Reports the git SHA and commit date of the running build, baked in at image build time, so production's actual version is visible from Telegram |
+| [`/version` command](version-command.md) | 🔧 In review ([#53](https://github.com/guidodinello/knowledger-bot/pull/53)) | Reports the git SHA and commit date of the running build, baked in at image build time, so production's actual version is visible from Telegram |

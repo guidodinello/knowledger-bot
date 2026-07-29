@@ -128,13 +128,23 @@ async def cmd_start(update: Update, context: CustomContext, user: User) -> None:
         "Send me a YouTube URL and I'll let you pick a Claude project to save the "
         "transcript to.\n\n"
         "Commands: /inqueue — show queue contents, /refresh — reload project list, "
-        "/help — show this message",
+        "/version — show running build, /help — show this message",
     )
 
 
 @_require_auth
 async def cmd_help(update: Update, context: CustomContext, user: User) -> None:
     await cmd_start(update, context)
+
+
+@_require_auth
+async def cmd_version(update: Update, context: CustomContext, user: User) -> None:
+    if update.message is None:
+        return
+    version = context.bot_data["config"].version
+    sha = version.commit_sha or "unknown"
+    date = version.commit_date or "unknown"
+    await update.message.reply_text(f"Running {sha}, committed {date}.")
 
 
 @_require_auth
@@ -782,6 +792,7 @@ def build_application(config: Config) -> Application:
     app.add_handler(CommandHandler("help", cmd_help))
     app.add_handler(CommandHandler("inqueue", cmd_inqueue))
     app.add_handler(CommandHandler("refresh", cmd_refresh))
+    app.add_handler(CommandHandler("version", cmd_version))
     app.add_handler(
         MessageHandler(filters.TEXT & filters.Regex(YOUTUBE_URL_PATTERN), handle_youtube_url),
     )

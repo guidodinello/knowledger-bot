@@ -106,6 +106,12 @@ class StorageSettings:
     data_dir: Path = field(default_factory=lambda: Path("."))
 
 
+@dataclass(frozen=True, slots=True)
+class VersionSettings:
+    commit_sha: str | None = None
+    commit_date: str | None = None
+
+
 # Single source of truth for the weekly recap's day-code -> UTC weekday mapping —
 # used both to validate WEEKLY_RECAP_DAY here and to compute the next occurrence in
 # weekly_recap.py.
@@ -137,6 +143,7 @@ class Config:
     poller: PollerSettings = field(default_factory=PollerSettings)
     storage: StorageSettings = field(default_factory=StorageSettings)
     weekly_recap: WeeklyRecapSettings = field(default_factory=WeeklyRecapSettings)
+    version: VersionSettings = field(default_factory=VersionSettings)
 
 
 def load_config() -> Config:
@@ -242,4 +249,8 @@ def load_config() -> Config:
             hour=recap_hour,
         ),
         logger=logger_config,
+        version=VersionSettings(
+            commit_sha=os.getenv("GIT_SHA") or None,
+            commit_date=os.getenv("GIT_COMMIT_DATE") or None,
+        ),
     )

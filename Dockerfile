@@ -18,4 +18,9 @@ COPY channels.json .
 RUN uv sync --frozen --no-dev && mkdir -p /app/data
 ENV DATA_DIR=/app/data
 
+ARG GIT_SHA=
+ARG GIT_COMMIT_DATE=
+ENV GIT_SHA=${GIT_SHA}
+ENV GIT_COMMIT_DATE=${GIT_COMMIT_DATE}
+
 CMD ["uv", "run", "python", "main.py"]
