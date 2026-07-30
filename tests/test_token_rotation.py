@@ -23,7 +23,11 @@ class FakeCookies:
         return self._session_key if name == "sessionKey" else None
 
 
-def _response(session_key: str | None = None, status: int = 200, **kwargs) -> SimpleNamespace:
+def _response(
+    session_key: str | None = None,
+    status: HTTPStatus = HTTPStatus.OK,
+    **kwargs,
+) -> SimpleNamespace:
     return SimpleNamespace(status_code=status, cookies=FakeCookies(session_key, **kwargs))
 
 
@@ -99,9 +103,13 @@ def test_renewal_without_persist_path_still_updates_memory() -> None:
     assert client._cookie == "sessionKey=renewed"
 
 
-def test_check_token_valid_on_200(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_check_token_valid_on_ok(monkeypatch: pytest.MonkeyPatch) -> None:
     client = ClaudeClient("token")
-    monkeypatch.setattr(ClaudeClient, "_request", lambda *a, **kw: _response(status=200))
+    monkeypatch.setattr(
+        ClaudeClient,
+        "_request",
+        lambda *a, **kw: _response(status=HTTPStatus.OK),
+    )
 
     assert client.check_token() is TokenStatus.VALID
 

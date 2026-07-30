@@ -8,7 +8,7 @@ import pytest
 from telegram import Update
 
 from knowledger.bot import CustomContext, handle_project_selection, handle_youtube_url
-from knowledger.claude_client import AuthError, ClaudeClient
+from knowledger.claude_client import ApiMethod, AuthError, ClaudeClient
 from knowledger.config import (
     ClaudeSettings,
     Config,
@@ -158,7 +158,13 @@ def test_load_persisted_projects_reads_written_value(tmp_path: Path) -> None:
 
 
 def _patch_projects_endpoint(monkeypatch: pytest.MonkeyPatch, projects: list[dict]) -> None:
-    def fake_request(_method: str, url: str, headers=None, impersonate=None, **_kw) -> FakeResponse:
+    def fake_request(
+        _method: ApiMethod,
+        url: str,
+        headers=None,
+        impersonate=None,
+        **_kw,
+    ) -> FakeResponse:
         if url.endswith("/organizations"):
             return FakeResponse(200, [{"uuid": "org1", "capabilities": ["chat"]}])
         return FakeResponse(200, projects)

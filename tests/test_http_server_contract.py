@@ -2,7 +2,9 @@
 https://github.com/guidodinello/knowledger-token-updater. The extension POSTs
 {"secret": ..., "token": ...} and branches on status code — if this endpoint's request/
 response shape drifts, that repo breaks silently with no signal here, so this test pins
-the exact payload and status codes the extension relies on.
+the exact payload and status codes the extension relies on. The extension is updated in
+lockstep when this contract changes — both repos are ours, so the endpoint gets the shape
+it should have rather than one carrying compatibility shims.
 
 Every test stubs ClaudeClient.check_token: the endpoint now probes the live token before
 adopting a posted one, and these tests must never reach the real claude.ai."""
@@ -90,9 +92,7 @@ def test_valid_secret_and_token_updates() -> None:
     )
 
     assert status == 200
-    # "status": "ok" is what the extension branches on; "updated" is additive, so the
-    # extension keeps working unchanged while gaining a way to tell the cases apart.
-    assert body == {"status": "ok", "updated": True}
+    assert body == {"outcome": "adopted"}
     assert client._cookie == "sessionKey=new-token"
 
 
@@ -107,7 +107,7 @@ def test_live_token_is_not_replaced(monkeypatch: pytest.MonkeyPatch) -> None:
     )
 
     assert status == 200
-    assert body == {"status": "ok", "updated": False, "reason": "current token still valid"}
+    assert body == {"outcome": "ignored", "reason": "current token still valid"}
     assert client._cookie == "sessionKey=dedicated-token"
 
 
@@ -136,7 +136,7 @@ def test_force_replaces_a_live_token(monkeypatch: pytest.MonkeyPatch) -> None:
     )
 
     assert status == 200
-    assert body == {"status": "ok", "updated": True}
+    assert body == {"outcome": "adopted"}
     assert client._cookie == "sessionKey=chosen-token"
 
 
@@ -158,7 +158,7 @@ def test_live_token_short_circuits_before_org_validation(monkeypatch: pytest.Mon
     )
 
     assert status == 200
-    assert body["updated"] is False
+    assert body["outcome"] == "ignored"
     assert calls == []
 
 

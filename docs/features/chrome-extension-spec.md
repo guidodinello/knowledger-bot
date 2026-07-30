@@ -88,8 +88,11 @@ chrome.cookies.onChanged.addListener(({ cookie, removed }) => {
     })
       .then((res) => res.json())
       .then((data) => {
-        if (data.status === "ok") {
+        if (data.outcome === "adopted") {
           console.log("[knowledger] Token updated successfully.");
+        } else if (data.outcome === "ignored") {
+          // The bot's own token still works — expected with a dedicated session
+          console.log("[knowledger] Token unchanged:", data.reason);
         } else {
           // 403 "wrong account" is expected on work account login — not an error
           console.log("[knowledger] Token update skipped:", data.error);
@@ -137,6 +140,6 @@ The bot must be running with `TOKEN_SERVER_PORT` set. See [README](../../README.
 
 ## Update: the endpoint may now ignore the extension
 
-Since [dedicated bot session](dedicated-bot-session.md), `/update-token` probes the bot's current token before adopting a posted one, and answers `{"status": "ok", "updated": false, "reason": "current token still valid"}` without changing anything if the bot's own token still works. A `503 {"error": "could not verify current token"}` means the probe was inconclusive and the bot kept its token; the next login retries.
+Since [dedicated bot session](dedicated-bot-session.md), `/update-token` probes the bot's current token before adopting a posted one, and answers `{"outcome": "ignored", "reason": "current token still valid"}` without changing anything if the bot's own token still works. A `503 {"error": "could not verify current token"}` means the probe was inconclusive and the bot kept its token; the next login retries.
 
-`background.js` above needs no change — it branches on `data.status === "ok"`, which still holds for both 200 cases. Its success message just reads "Token updated successfully" on an ignored update, which is cosmetically wrong but harmless. Branching on `data.updated` instead of `data.status` tightens the logging if that's worth doing.
+**This was a breaking change.** Success responses used to be `{"status": "ok"}`; they now report `{"outcome": "adopted"}` or `{"outcome": "ignored"}`. The `background.js` above has been updated to branch on `data.outcome`, and the change is live in the extension repo — an older copy of the extension still branching on `data.status` will log every response through its error path (harmless, since it only logs, but it will no longer report a genuine update as a success).

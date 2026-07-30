@@ -2,7 +2,7 @@ import json
 from enum import StrEnum
 from http import HTTPStatus
 from pathlib import Path
-from typing import Literal, TypedDict
+from typing import Literal, TypedDict, overload
 
 from curl_cffi import requests
 
@@ -21,6 +21,10 @@ class Doc(TypedDict):
     uuid: str
     file_name: str
 
+
+# Narrower than curl_cffi's own HttpMethod (nine verbs): only the three the Claude API
+# client actually issues, so an unsupported verb is a type error rather than a runtime 405.
+ApiMethod = Literal["GET", "POST", "DELETE"]
 
 BASE_URL = "https://claude.ai/api"
 USER_AGENT = (
@@ -73,15 +77,28 @@ class ClaudeClient:
             "Cookie": self._cookie,
         }
 
+    @overload
+    def _request(self, method: Literal["GET", "DELETE"], url: str) -> requests.Response: ...
+
+    @overload
+    def _request(self, method: Literal["POST"], url: str, *, data: str) -> requests.Response: ...
+
     def _request(
         self,
-        method: Literal["GET", "POST", "DELETE"],
+        method: ApiMethod,
         url: str,
-        **kwargs,
+        *,
+        data: str | None = None,
     ) -> requests.Response:
         """The single choke point for every claude.ai call: attaches the auth headers and
         browser impersonation, adopts a renewed session cookie if the response carries one,
         then raises AuthError on a 401/403.
+
+        The overloads confine `data` to POST. Routing every verb through one helper would
+        otherwise make a GET-with-a-body expressible; note that it always was — curl_cffi's
+        `get()` takes **kwargs: Unpack[SessionRequestParams], and `data` is declared in that
+        TypedDict — so this is strictly tighter than the per-verb calls it replaced, not a
+        loosening of them.
 
         Callers decide whether to raise_for_status() — check_token() deliberately doesn't,
         because it reports a non-auth failure as UNKNOWN instead of raising."""
@@ -90,7 +107,7 @@ class ClaudeClient:
             url,
             headers=self._get_headers(),
             impersonate="chrome110",
-            **kwargs,
+            data=data,
         )
         self._adopt_renewed_token(response)
         self._check_auth(response)

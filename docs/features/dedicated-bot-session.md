@@ -87,21 +87,25 @@ could never be replaced by hand. It does not skip the shared-secret or org check
 
 `/update-token` is a cross-repo contract with
 [knowledger-token-updater](https://github.com/guidodinello/knowledger-token-updater),
-pinned by `tests/test_http_server_contract.py`. The changes are additive — the extension
-branches on `data.status === "ok"`, which still holds:
+pinned by `tests/test_http_server_contract.py`.
 
 | Case | Status | Body |
 |---|---|---|
-| Token adopted | 200 | `{"status": "ok", "updated": true}` |
-| Current token still works, posted one ignored | 200 | `{"status": "ok", "updated": false, "reason": "current token still valid"}` |
+| Token adopted | 200 | `{"outcome": "adopted"}` |
+| Current token still works, posted one ignored | 200 | `{"outcome": "ignored", "reason": "current token still valid"}` |
 | Couldn't verify the current token | 503 | `{"error": "could not verify current token"}` |
 | Wrong/missing secret | 403 | `{"error": "forbidden"}` |
 | Posted token invalid | 401 | `{"error": "token is invalid"}` |
 | Posted token from the wrong account | 403 | `{"error": "token belongs to wrong account"}` |
 
-The extension needs no change. Its success log now reads "Token updated successfully" on
-an ignored update too, which is cosmetically wrong but harmless; branching on `updated` if
-that's worth tightening is a one-line change on that side.
+Success responses report a single `outcome` rather than a generic `{"status": "ok"}` plus a
+separate `updated` flag. Whether the posted token was actually taken up is the one thing a
+caller needs to know, so it shouldn't have to correlate two fields to learn it.
+
+That is a breaking change for the extension, which branched on `data.status === "ok"`.
+Keeping `status` alongside `outcome` purely to avoid the break was considered and rejected:
+both repos are ours, so the endpoint gets the shape it should have and the extension is
+updated in lockstep rather than the API carrying a compatibility shim indefinitely.
 
 ## Verification
 

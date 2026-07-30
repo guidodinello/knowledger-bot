@@ -1,5 +1,6 @@
 import asyncio
 import hmac
+from enum import StrEnum
 
 from aiohttp import web
 from aiohttp.web_middlewares import middleware
@@ -11,6 +12,15 @@ from .logger import get_logger
 from .queue_processor import QueueProcessor
 
 logger = get_logger(__name__)
+
+
+class UpdateOutcome(StrEnum):
+    """What /update-token did with the posted token. Success responses carry exactly this
+    field, so a caller reads one value instead of correlating a generic "ok" with a
+    separate boolean."""
+
+    ADOPTED = "adopted"
+    IGNORED = "ignored"
 
 
 def _log_background_task_result(task: asyncio.Task) -> None:
@@ -47,6 +57,10 @@ async def _handle_update_token(request: web.Request) -> web.Response:
     The request/response shape and status codes here are a cross-repo contract — see
     tests/test_http_server_contract.py, which pins them so a drift here is caught in CI
     rather than surfacing as a silent failure in the extension.
+
+    Success responses report a single UpdateOutcome rather than a generic {"status": "ok"}
+    plus a separate flag: whether the posted token was actually taken up is the one thing a
+    caller needs, so it shouldn't have to correlate two fields to learn it.
 
     A posted token is only adopted when the bot's *current* one has stopped working. That
     matters once the bot holds its own dedicated session rather than piggybacking on the
@@ -86,7 +100,10 @@ async def _handle_update_token(request: web.Request) -> web.Response:
             case TokenStatus.VALID:
                 logger.info("Ignored token update — the current token still works")
                 return web.json_response(
-                    {"status": "ok", "updated": False, "reason": "current token still valid"},
+                    {
+                        "outcome": UpdateOutcome.IGNORED,
+                        "reason": "current token still valid",
+                    },
                 )
             case TokenStatus.UNKNOWN:
                 # Fail closed: a transient Claude outage must not be enough to replace a
@@ -127,7 +144,7 @@ async def _handle_update_token(request: web.Request) -> web.Response:
     processor: QueueProcessor = request.app["queue_processor"]
     _run_in_background(request.app, processor.drain(telegram_app, config, client))
 
-    return web.json_response({"status": "ok", "updated": True})
+    return web.json_response({"outcome": UpdateOutcome.ADOPTED})
 
 
 def _make_cors_middleware(allowed_origin: str):

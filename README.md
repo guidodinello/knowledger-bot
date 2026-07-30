@@ -62,7 +62,7 @@ curl -X POST http://localhost:8080/update-token \
 
 Any queued uploads are retried automatically after a successful token update.
 
-**A posted token is only adopted when the bot's current one has stopped working.** The endpoint probes the live token first and answers `{"status": "ok", "updated": false}` if it's still good, leaving it untouched. Add `"force": true` to replace a working token deliberately. If the current token can't be verified at all (Claude unreachable), the endpoint fails closed with `503` rather than risk replacing a token that may be fine.
+**A posted token is only adopted when the bot's current one has stopped working.** The endpoint probes the live token first and answers `{"outcome": "ignored", "reason": "current token still valid"}` if it's still good, leaving it untouched; a token that is taken up answers `{"outcome": "adopted"}`. Add `"force": true` to replace a working token deliberately. If the current token can't be verified at all (Claude unreachable), the endpoint fails closed with `503` rather than risk replacing a token that may be fine.
 
 That check exists so the bot can hold a session of its own instead of borrowing the browser's — see [dedicated bot session](docs/features/dedicated-bot-session.md). Log into claude.ai once in an incognito window, give the bot that `sessionKey`, and close the window without logging out: your day-to-day account switching stops affecting the bot, and the extension becomes a fallback that only fires when the bot's token is genuinely dead. The bot also picks up renewed `sessionKey` cookies from Claude's responses, so a dedicated session refreshes itself instead of expiring on a fixed deadline.
 
