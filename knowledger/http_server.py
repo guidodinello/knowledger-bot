@@ -5,7 +5,7 @@ from aiohttp import web
 from aiohttp.web_middlewares import middleware
 from telegram.ext import Application
 
-from .claude_client import AuthError, ClaudeClient, get_org_id_for_token
+from .claude_client import AuthError, ClaudeClient, TokenStatus, get_org_id_for_token
 from .config import Config, TokenServerSettings
 from .logger import get_logger
 from .queue_processor import QueueProcessor
@@ -46,7 +46,18 @@ async def _handle_update_token(request: web.Request) -> web.Response:
     {"secret": ..., "token": ...} whenever it observes a fresh claude.ai session token.
     The request/response shape and status codes here are a cross-repo contract — see
     tests/test_http_server_contract.py, which pins them so a drift here is caught in CI
-    rather than surfacing as a silent failure in the extension."""
+    rather than surfacing as a silent failure in the extension.
+
+    A posted token is only adopted when the bot's *current* one has stopped working. That
+    matters once the bot holds its own dedicated session rather than piggybacking on the
+    browser's: without the check, every login on any machine would overwrite a perfectly
+    good long-lived token with a browser session cookie that dies on the next logout —
+    silently reintroducing the coupling the dedicated session exists to remove. With it,
+    the extension degrades into a fallback that only fires when the bot is actually broken.
+    Pass {"force": true} to adopt a token regardless (deliberate rotation by hand).
+
+    The liveness check short-circuits *before* PERSONAL_ORG_ID validation so a token we've
+    already decided not to adopt is never forwarded to Claude just to identify it."""
     settings: TokenServerSettings = request.app["settings"]
     client: ClaudeClient = request.app["claude_client"]
 
@@ -69,6 +80,24 @@ async def _handle_update_token(request: web.Request) -> web.Response:
     if not isinstance(raw_token, str) or not raw_token.strip():
         return web.json_response({"error": "'token' must be a non-empty string"}, status=400)
     new_token = raw_token.strip()
+
+    if body.get("force") is not True:
+        match await asyncio.to_thread(client.check_token):
+            case TokenStatus.VALID:
+                logger.info("Ignored token update — the current token still works")
+                return web.json_response(
+                    {"status": "ok", "updated": False, "reason": "current token still valid"},
+                )
+            case TokenStatus.UNKNOWN:
+                # Fail closed: a transient Claude outage must not be enough to replace a
+                # token that may well be fine. Self-healing — the next login POSTs again,
+                # and {"force": true} overrides if it never resolves.
+                return web.json_response(
+                    {"error": "could not verify current token"},
+                    status=503,
+                )
+            case TokenStatus.INVALID:
+                pass
 
     if settings.personal_org_id is not None:
         try:
@@ -98,7 +127,7 @@ async def _handle_update_token(request: web.Request) -> web.Response:
     processor: QueueProcessor = request.app["queue_processor"]
     _run_in_background(request.app, processor.drain(telegram_app, config, client))
 
-    return web.json_response({"status": "ok"})
+    return web.json_response({"status": "ok", "updated": True})
 
 
 def _make_cors_middleware(allowed_origin: str):

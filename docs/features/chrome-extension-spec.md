@@ -132,3 +132,11 @@ chrome.cookies.onChanged.addListener(({ cookie, removed }) => {
 ## Server-side prerequisite
 
 The bot must be running with `TOKEN_SERVER_PORT` set. See [README](../../README.md#token-management) for configuration. The `PERSONAL_ORG_ID` variable is what makes the work-account rejection work — set it to your personal Claude org UUID.
+
+---
+
+## Update: the endpoint may now ignore the extension
+
+Since [dedicated bot session](dedicated-bot-session.md), `/update-token` probes the bot's current token before adopting a posted one, and answers `{"status": "ok", "updated": false, "reason": "current token still valid"}` without changing anything if the bot's own token still works. A `503 {"error": "could not verify current token"}` means the probe was inconclusive and the bot kept its token; the next login retries.
+
+`background.js` above needs no change — it branches on `data.status === "ok"`, which still holds for both 200 cases. Its success message just reads "Token updated successfully" on an ignored update, which is cosmetically wrong but harmless. Branching on `data.updated` instead of `data.status` tightens the logging if that's worth doing.
