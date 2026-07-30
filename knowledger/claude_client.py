@@ -2,7 +2,7 @@ import json
 from enum import StrEnum
 from http import HTTPStatus
 from pathlib import Path
-from typing import Literal, TypedDict, overload
+from typing import Literal, TypedDict
 
 from curl_cffi import requests
 
@@ -77,12 +77,6 @@ class ClaudeClient:
             "Cookie": self._cookie,
         }
 
-    @overload
-    def _request(self, method: Literal["GET", "DELETE"], url: str) -> requests.Response: ...
-
-    @overload
-    def _request(self, method: Literal["POST"], url: str, *, data: str) -> requests.Response: ...
-
     def _request(
         self,
         method: ApiMethod,
@@ -94,11 +88,12 @@ class ClaudeClient:
         browser impersonation, adopts a renewed session cookie if the response carries one,
         then raises AuthError on a 401/403.
 
-        The overloads confine `data` to POST. Routing every verb through one helper would
-        otherwise make a GET-with-a-body expressible; note that it always was — curl_cffi's
-        `get()` takes **kwargs: Unpack[SessionRequestParams], and `data` is declared in that
-        TypedDict — so this is strictly tighter than the per-verb calls it replaced, not a
-        loosening of them.
+        `data` is accepted for any verb, not confined to POST. A GET with content is
+        discouraged (RFC 9110 §9.3.1 SHOULD NOT, and RFC 7231 gave it no defined semantics)
+        but it isn't a protocol violation, and curl_cffi permitted it here already — `get()`
+        takes **kwargs: Unpack[SessionRequestParams], where `data` is declared. Enforcing
+        the split in the type system isn't worth the machinery for three fixed calls to one
+        origin server, none of which sends a GET body.
 
         Callers decide whether to raise_for_status() — check_token() deliberately doesn't,
         because it reports a non-auth failure as UNKNOWN instead of raising."""
