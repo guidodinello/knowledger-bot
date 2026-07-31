@@ -126,7 +126,7 @@ be checked at leisure.
    lifetime and will eventually need a manual refresh (which the extension will handle
    automatically, since by then the current token is invalid).
 5. **Fallback still works** — revoke the dedicated session, then log into claude.ai. The
-   extension's POST should be adopted (`updated: true`) and the queue should drain.
+   endpoint should answer `{"outcome": "adopted"}` and the queue should drain.
 
 ## Alternative considered: log in from the bot
 
