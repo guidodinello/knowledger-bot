@@ -52,7 +52,7 @@ Send the bot a YouTube URL. It will show your Claude projects as buttons — tap
 
 ## Token management
 
-The Claude session token is a `sessionKey` cookie from claude.ai. It gets invalidated when you log out (e.g. to switch accounts). Update it without restarting via the HTTP endpoint: set `TOKEN_SERVER_PORT` and `TOKEN_UPDATE_SECRET` to enable a `POST /update-token` endpoint. Intended for automated flows like the [Chrome extension](docs/features/chrome-extension-spec.md), which updates the token silently whenever you log back into your personal Claude account on desktop.
+The Claude session token is a `sessionKey` cookie from claude.ai. Logging out of the browser session it came from invalidates it (e.g. when switching accounts). Update it without restarting via the HTTP endpoint: set `TOKEN_SERVER_PORT` and `TOKEN_UPDATE_SECRET` to enable a `POST /update-token` endpoint. Intended for automated flows like the [Chrome extension](docs/features/chrome-extension-spec.md), which updates the token silently whenever you log back into your personal Claude account on desktop.
 
 ```bash
 curl -X POST http://localhost:8080/update-token \
@@ -61,6 +61,10 @@ curl -X POST http://localhost:8080/update-token \
 ```
 
 Any queued uploads are retried automatically after a successful token update.
+
+**A posted token is only adopted when the bot's current one has stopped working.** The endpoint probes the live token first and answers `{"outcome": "ignored", "reason": "current token still valid"}` if it's still good, leaving it untouched; a token that is taken up answers `{"outcome": "adopted"}`. Add `"force": true` to replace a working token deliberately. If the current token can't be verified at all (Claude unreachable), the endpoint fails closed with `503` rather than risk replacing a token that may be fine.
+
+That check exists so the bot can hold a session of its own instead of borrowing the browser's — see [dedicated bot session](docs/features/dedicated-bot-session.md). Log into claude.ai once in an incognito window, give the bot that `sessionKey`, and close the window without logging out: your day-to-day account switching stops affecting the bot, and the extension becomes a fallback that only fires when the bot's token is genuinely dead. The bot also picks up renewed `sessionKey` cookies from Claude's responses, so a dedicated session refreshes itself instead of expiring on a fixed deadline.
 
 ### Environment variables
 

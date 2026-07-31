@@ -88,8 +88,11 @@ chrome.cookies.onChanged.addListener(({ cookie, removed }) => {
     })
       .then((res) => res.json())
       .then((data) => {
-        if (data.status === "ok") {
+        if (data.outcome === "adopted") {
           console.log("[knowledger] Token updated successfully.");
+        } else if (data.outcome === "ignored") {
+          // The bot's own token still works — expected with a dedicated session
+          console.log("[knowledger] Token unchanged:", data.reason);
         } else {
           // 403 "wrong account" is expected on work account login — not an error
           console.log("[knowledger] Token update skipped:", data.error);
@@ -132,3 +135,11 @@ chrome.cookies.onChanged.addListener(({ cookie, removed }) => {
 ## Server-side prerequisite
 
 The bot must be running with `TOKEN_SERVER_PORT` set. See [README](../../README.md#token-management) for configuration. The `PERSONAL_ORG_ID` variable is what makes the work-account rejection work — set it to your personal Claude org UUID.
+
+---
+
+## Update: the endpoint may now ignore the extension
+
+Since [dedicated bot session](dedicated-bot-session.md), `/update-token` probes the bot's current token before adopting a posted one, and answers `{"outcome": "ignored", "reason": "current token still valid"}` without changing anything if the bot's own token still works. A `503 {"error": "could not verify current token"}` means the probe was inconclusive and the bot kept its token; the next login retries.
+
+**This was a breaking change.** Success responses used to be `{"status": "ok"}`; they now report `{"outcome": "adopted"}` or `{"outcome": "ignored"}`. The `background.js` above has been updated to branch on `data.outcome`; the matching change to the real extension (`src/entrypoints/background.ts` in [knowledger-token-updater](https://github.com/guidodinello/knowledger-token-updater), which is a WXT/TypeScript project rather than the two-file sketch above) needs to land alongside this. An older copy of the extension still branching on `data.status` will route every response through its error path — harmless, since it only logs, but it stops reporting a genuine update as a success.

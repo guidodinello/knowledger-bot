@@ -16,6 +16,7 @@
 | [Weekly upload recap](weekly-recap.md) | Sunday summary of what the poller auto-transcribed and uploaded that week, per project, backed by a new append-only `upload_history.json` |
 | [Per-channel Claude project + baseline seeding](per-channel-project-and-baseline-seed.md) | Lets each watched YouTube channel target its own Claude project (investments vs. exercise, etc.) instead of one global project, and seeds new channels without flooding their back-catalogue |
 | [`/version` command](version-command.md) | Reports the git SHA and commit date of the running build, baked in at image build time, so production's actual version is visible from Telegram |
+| [Dedicated bot session](dedicated-bot-session.md) | Decouples the bot's auth from the browser's login state: adopts renewed `sessionKey` cookies off Claude responses, and stops `/update-token` from overwriting a token that still works |
 
 ## Proposed
 

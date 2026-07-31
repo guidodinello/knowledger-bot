@@ -8,7 +8,7 @@ import pytest
 from telegram import Update
 
 from knowledger.bot import CustomContext, handle_project_selection, handle_youtube_url
-from knowledger.claude_client import AuthError, ClaudeClient
+from knowledger.claude_client import ApiMethod, AuthError, ClaudeClient
 from knowledger.config import (
     ClaudeSettings,
     Config,
@@ -22,10 +22,19 @@ from knowledger.queue import Queue
 from knowledger.youtube import VideoMetadata
 
 
+class FakeCookies:
+    """ClaudeClient reads `sessionKey` off every response to pick up session renewals;
+    these fixtures carry none, so the client keeps the token it was constructed with."""
+
+    def get(self, _name: str) -> str | None:
+        return None
+
+
 class FakeResponse:
     def __init__(self, status_code: int, payload: object) -> None:
         self.status_code = status_code
         self._payload = payload
+        self.cookies = FakeCookies()
 
     def json(self) -> object:
         return self._payload
@@ -149,12 +158,18 @@ def test_load_persisted_projects_reads_written_value(tmp_path: Path) -> None:
 
 
 def _patch_projects_endpoint(monkeypatch: pytest.MonkeyPatch, projects: list[dict]) -> None:
-    def fake_get(url: str, headers=None, impersonate=None) -> FakeResponse:
+    def fake_request(
+        _method: ApiMethod,
+        url: str,
+        headers=None,
+        impersonate=None,
+        **_kw,
+    ) -> FakeResponse:
         if url.endswith("/organizations"):
             return FakeResponse(200, [{"uuid": "org1", "capabilities": ["chat"]}])
         return FakeResponse(200, projects)
 
-    monkeypatch.setattr("knowledger.claude_client.requests.get", fake_get)
+    monkeypatch.setattr("knowledger.claude_client.requests.request", fake_request)
 
 
 def test_list_projects_persists_cache_on_success(
