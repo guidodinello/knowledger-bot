@@ -8,6 +8,7 @@ from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
+from curl_cffi.requests.exceptions import CookieConflict, RequestException
 
 from knowledger.claude_client import AuthError, ClaudeClient, TokenStatus
 
@@ -80,9 +81,40 @@ def test_unreadable_cookies_do_not_break_the_call(tmp_path: Path) -> None:
     successful upload into a failure."""
     client = ClaudeClient("original", persist_path=tmp_path / "session_token.json")
 
-    client._adopt_renewed_token(_response(raises=RuntimeError("cookie conflict")))  # type: ignore[arg-type]
+    client._adopt_renewed_token(_response(raises=CookieConflict("two domains")))  # type: ignore[arg-type]
 
     assert client._cookie == "sessionKey=original"
+
+
+@pytest.mark.parametrize(
+    "status",
+    [
+        HTTPStatus.UNAUTHORIZED,
+        HTTPStatus.FORBIDDEN,
+        HTTPStatus.INTERNAL_SERVER_ERROR,
+        HTTPStatus.TOO_MANY_REQUESTS,
+    ],
+)
+def test_cookie_on_an_error_response_is_not_adopted(status: HTTPStatus, tmp_path: Path) -> None:
+    """Adoption runs before _check_auth, so without a status gate a 401/403/5xx carrying a
+    Set-Cookie would durably replace the live token — fail-open in a fail-closed feature."""
+    persist_path = tmp_path / "session_token.json"
+    client = ClaudeClient("original", persist_path=persist_path)
+
+    client._adopt_renewed_token(_response("attacker-or-garbage", status=status))  # type: ignore[arg-type]
+
+    assert client._cookie == "sessionKey=original"
+    assert not persist_path.exists()
+
+
+def test_cookie_on_a_created_response_is_adopted(tmp_path: Path) -> None:
+    """The gate is 2xx, not 200 — upload_content's success status is 201, and a renewal
+    arriving on it must still be taken up."""
+    client = ClaudeClient("original", persist_path=tmp_path / "session_token.json")
+
+    client._adopt_renewed_token(_response("renewed", status=HTTPStatus.CREATED))  # type: ignore[arg-type]
+
+    assert client._cookie == "sessionKey=renewed"
 
 
 def test_persist_failure_keeps_current_cookie_active(tmp_path: Path) -> None:
@@ -128,11 +160,24 @@ def test_check_token_unknown_on_network_failure(monkeypatch: pytest.MonkeyPatch)
     distinction to decide whether replacing the token is safe."""
 
     def _raise(*_args, **_kwargs):
-        raise OSError("connection reset")
+        raise RequestException("connection reset")
 
     monkeypatch.setattr(ClaudeClient, "_request", _raise)
 
     assert ClaudeClient("token").check_token() is TokenStatus.UNKNOWN
+
+
+def test_check_token_lets_programming_errors_surface(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Only transport failures mean UNKNOWN. A defect in the request path must propagate
+    rather than be laundered into a 503 that reads as "Claude was unreachable"."""
+
+    def _raise(*_args, **_kwargs):
+        raise AttributeError("typo in the request path")
+
+    monkeypatch.setattr(ClaudeClient, "_request", _raise)
+
+    with pytest.raises(AttributeError):
+        ClaudeClient("token").check_token()
 
 
 def test_check_token_unknown_on_server_error(monkeypatch: pytest.MonkeyPatch) -> None:

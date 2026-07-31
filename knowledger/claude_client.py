@@ -5,6 +5,7 @@ from pathlib import Path
 from typing import Literal, TypedDict
 
 from curl_cffi import requests
+from curl_cffi.requests.exceptions import CookieConflict, RequestException
 
 from .logger import get_logger
 from .persistence import PersistenceIOError, atomic_write_json
@@ -25,6 +26,8 @@ class Doc(TypedDict):
 # Narrower than curl_cffi's own HttpMethod (nine verbs): only the three the Claude API
 # client actually issues, so an unsupported verb is a type error rather than a runtime 405.
 ApiMethod = Literal["GET", "POST", "DELETE"]
+
+SESSION_COOKIE_NAME = "sessionKey"
 
 BASE_URL = "https://claude.ai/api"
 USER_AGENT = (
@@ -55,7 +58,7 @@ class ClaudeClient:
         projects_persist_path: Path | None = None,
     ) -> None:
         self._session_token = session_token
-        self._cookie = f"sessionKey={session_token}"
+        self._cookie = f"{SESSION_COOKIE_NAME}={session_token}"
         self._persist_path = persist_path
         self._projects_persist_path = projects_persist_path
         self._org_id_cache: str | None = None
@@ -120,12 +123,19 @@ class ClaudeClient:
         changes. update_token()'s cache invalidation exists for the *different account*
         case, and firing it here would pointlessly re-fetch the project list.
 
+        Only 2xx responses are trusted. Adoption runs before _check_auth, so without this
+        gate a 401/403/5xx that happened to carry a Set-Cookie would durably replace the live
+        token — fail-open in a feature that is fail-closed everywhere else, and check_token()
+        could adopt a cookie off the very response it classifies as INVALID.
+
         Never raises. Cookie parsing is best-effort, and on a persist failure the current
         cookie stays active (the server honours it for a grace period after renewal) rather
         than activating a token a restart would silently revert."""
+        if not HTTPStatus.OK <= response.status_code < HTTPStatus.MULTIPLE_CHOICES:
+            return
         try:
-            renewed = response.cookies.get("sessionKey")
-        except Exception:
+            renewed = response.cookies.get(SESSION_COOKIE_NAME)
+        except CookieConflict:
             logger.debug("Could not read cookies off a Claude response", exc_info=True)
             return
         if not renewed or renewed == self._session_token:
@@ -137,7 +147,7 @@ class ClaudeClient:
                 logger.exception("Failed to persist renewed session token; keeping current one")
                 return
         self._session_token = renewed
-        self._cookie = f"sessionKey={renewed}"
+        self._cookie = f"{SESSION_COOKIE_NAME}={renewed}"
         logger.info("Adopted a renewed Claude session cookie")
 
     def check_token(self) -> TokenStatus:
@@ -149,7 +159,7 @@ class ClaudeClient:
             response = self._request("GET", f"{BASE_URL}/organizations")
         except AuthError:
             return TokenStatus.INVALID
-        except Exception:
+        except RequestException:
             logger.warning("Could not verify the current session token", exc_info=True)
             return TokenStatus.UNKNOWN
         if response.status_code != HTTPStatus.OK:
@@ -217,7 +227,7 @@ class ClaudeClient:
         if self._persist_path is not None:
             self._persist_token(self._persist_path, session_token)
         self._session_token = session_token
-        self._cookie = f"sessionKey={session_token}"
+        self._cookie = f"{SESSION_COOKIE_NAME}={session_token}"
         self._org_id_cache = None
         self._projects_cache = None
 

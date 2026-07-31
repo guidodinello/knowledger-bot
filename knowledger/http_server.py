@@ -1,6 +1,7 @@
 import asyncio
 import hmac
 from enum import StrEnum
+from http import HTTPStatus
 
 from aiohttp import web
 from aiohttp.web_middlewares import middleware
@@ -111,7 +112,7 @@ async def _handle_update_token(request: web.Request) -> web.Response:
                 # and {"force": true} overrides if it never resolves.
                 return web.json_response(
                     {"error": "could not verify current token"},
-                    status=503,
+                    status=HTTPStatus.SERVICE_UNAVAILABLE,
                 )
             case TokenStatus.INVALID:
                 pass
