@@ -3,7 +3,7 @@ import json
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from types import SimpleNamespace
-from typing import cast
+from typing import Any, cast
 from unittest.mock import AsyncMock, patch
 
 import pytest
@@ -18,6 +18,7 @@ from knowledger.config import (
     StorageSettings,
     TelegramSettings,
 )
+from knowledger.persistence import CorruptDataError
 from knowledger.poller import (
     UPLOAD_DELAY,
     Channel,
@@ -25,6 +26,7 @@ from knowledger.poller import (
     PollerState,
     TranscriptPoller,
     run_poller,
+    save_channels,
 )
 from knowledger.queue import Queue
 
@@ -44,7 +46,7 @@ class FakeClaudeClient:
         self.uploads.append((project_id, file_name))
 
 
-def _config(tmp_path: Path, **poller_kwargs: object) -> Config:
+def _config(tmp_path: Path, **poller_kwargs: Any) -> Config:
     return Config(
         logger=LoggerConfig(),
         telegram=TelegramSettings(bot_token="x", allowed_user_ids=frozenset({1})),
@@ -73,9 +75,14 @@ def _poller(
     state: PollerState,
     project_name: str = "Default",
 ) -> TranscriptPoller:
+    # Every tick re-reads channels_path (so /subscribe takes effect without a restart),
+    # so the watch list has to exist on disk here — otherwise the default relative
+    # "channels.json" would make these tests depend on the repo's real one.
+    channels_path = tmp_path / "channels.json"
+    save_channels(channels_path, channels)
     return TranscriptPoller(
         app=cast(Application, object()),
-        config=_config(tmp_path),
+        config=_config(tmp_path, channels_path=channels_path),
         client=cast(ClaudeClient, client),
         queue=Queue(path=tmp_path / "q.json"),
         channels=channels,
@@ -254,6 +261,87 @@ def test_run_poller_backward_compat_upgrade_reseeds_without_flooding_pending(
     assert final_state.baseline_seeded == {"chan-a"}
     assert final_state.seen == {"existing-a"}
     assert final_state.pending == []
+
+
+# --- Part C: picking up watch-list edits without a restart ---------------------------
+
+
+def test_tick_picks_up_a_newly_subscribed_channel_and_seeds_its_back_catalogue(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """/subscribe writes channels.json while the poller is running — the next tick must
+    start watching the channel, and treat everything already on it as seen so the back
+    catalogue is never uploaded."""
+    client = FakeClaudeClient([{"uuid": "default-id", "name": "Default"}])
+    state = PollerState(path=tmp_path / "state.json")
+    poller = _poller(tmp_path, client, [], state)
+
+    back_catalogue = [_feed_video("chan-new", "old-video")]
+    monkeypatch.setattr("knowledger.poller.fetch_feed", lambda cid, proxy=None: back_catalogue)
+    save_channels(
+        tmp_path / "channels.json",
+        [Channel(handle="@new", name="New", channel_id="chan-new")],
+    )
+
+    asyncio.run(poller._tick())
+
+    assert state.baseline_seeded == {"chan-new"}
+    assert state.seen == {"old-video"}
+    assert state.pending == []  # seeded, not enqueued
+
+    # A video published after subscribing is picked up normally on the following tick.
+    back_catalogue.append(_feed_video("chan-new", "brand-new"))
+    asyncio.run(poller._tick())
+
+    assert [v.video_id for v in state.pending] == ["brand-new"]
+
+
+def test_tick_keeps_watching_when_the_channel_list_becomes_unreadable(
+    tmp_path: Path,
+) -> None:
+    """A corrupt channels.json is a reason to keep watching what we already loaded —
+    not to silently stop watching everything."""
+    client = FakeClaudeClient([{"uuid": "default-id", "name": "Default"}])
+    channels = [Channel(handle="@a", name="A", channel_id="chan-a")]
+    state = PollerState(path=tmp_path / "state.json", baseline_seeded={"chan-a"})
+    poller = _poller(tmp_path, client, channels, state)
+    (tmp_path / "channels.json").write_text("{ not json")
+
+    asyncio.run(poller._tick())
+
+    assert poller._channels == channels
+
+
+def test_run_poller_still_fails_closed_on_a_corrupt_watch_list(tmp_path: Path) -> None:
+    """Softening the *reload* must not soften startup: a corrupt file at boot is a
+    configuration error, and starting up watching nothing would hide it."""
+    channels_path = tmp_path / "channels.json"
+    channels_path.write_text("{ not json")
+    config = _config(tmp_path, auto_transcript_project="Default", channels_path=channels_path)
+    app = cast(
+        Application,
+        SimpleNamespace(
+            bot_data={"claude_client": object(), "queue": Queue(path=tmp_path / "q.json")},
+        ),
+    )
+
+    with pytest.raises(CorruptDataError):
+        asyncio.run(run_poller(app, config))
+
+
+def test_tick_uploads_a_pending_video_whose_channel_was_unsubscribed(tmp_path: Path) -> None:
+    """Removing a channel from channels.json must not strand videos already detected
+    from it — they finish on the global default project."""
+    client = FakeClaudeClient([{"uuid": "default-id", "name": "Default"}])
+    state = PollerState(path=tmp_path / "state.json")
+    state.pending = [_old_video("chan-gone", "v1")]
+    poller = _poller(tmp_path, client, [], state)
+
+    asyncio.run(poller._tick())
+
+    assert state.pending == []
+    assert [pid for pid, _ in client.uploads] == ["default-id"]
 
 
 if __name__ == "__main__":

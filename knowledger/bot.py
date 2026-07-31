@@ -1,5 +1,5 @@
 import asyncio
-from collections.abc import Callable, Coroutine
+from collections.abc import Awaitable, Callable, Coroutine
 from datetime import UTC, datetime
 from functools import wraps
 from typing import Any, TypedDict
@@ -23,9 +23,16 @@ from .history import UploadRecord, record_upload
 from .logger import get_logger
 from .pending_transcripts import PendingTranscript, PendingTranscriptStore
 from .persistence import PersistenceError
-from .poller import PollerState
+from .poller import PollerState, load_channels
 from .queue import Queue, QueueEntry
 from .queue_processor import DrainResult, QueueProcessor
+from .subscriptions import (
+    ResolvedChannel,
+    SubscriptionError,
+    add_subscription,
+    find_subscription,
+    resolve_subscription,
+)
 from .transcript import TranscriptTransportError, TranscriptUnavailable, fetch_transcript
 from .upload_service import (
     AlreadyExists,
@@ -59,11 +66,19 @@ CustomContext = CallbackContext[Any, dict, dict, BotData]
 YOUTUBE_URL_PATTERN = r"https?://(www\.)?(youtube\.com/watch|youtu\.be/|youtube\.com/shorts/)\S+"
 
 
-def _keyboard_for(projects: list[Project], msg_id: int | str) -> InlineKeyboardMarkup:
+def _keyboard_for(
+    projects: list[Project],
+    msg_id: int | str,
+    prefix: str = "",
+) -> InlineKeyboardMarkup:
     """Every project, no "More..." row — used once the user has asked to see the full
-    list, or when no whitelist is configured at all."""
+    list, or when no whitelist is configured at all.
+
+    `prefix` routes the callback to a different handler (see `_SUBSCRIBE_PREFIX`); the
+    default empty prefix is the transcript-upload picker."""
     keyboard = [
-        [InlineKeyboardButton(p["name"], callback_data=f"{p['uuid']}:{msg_id}")] for p in projects
+        [InlineKeyboardButton(p["name"], callback_data=f"{prefix}{p['uuid']}:{msg_id}")]
+        for p in projects
     ]
     return InlineKeyboardMarkup(keyboard)
 
@@ -72,19 +87,49 @@ def _build_keyboard(
     projects: list[Project],
     msg_id: int | str,
     whitelist: frozenset[str],
+    prefix: str = "",
 ) -> InlineKeyboardMarkup:
     """Whitelist-filtered view, with a "More..." row when it hides any project — the
     caller wanting the unfiltered list uses `_keyboard_for` directly instead of passing
     an empty whitelist here."""
     if not whitelist:
-        return _keyboard_for(projects, msg_id)
+        return _keyboard_for(projects, msg_id, prefix)
     visible = [p for p in projects if p["name"] in whitelist]
     keyboard = [
-        [InlineKeyboardButton(p["name"], callback_data=f"{p['uuid']}:{msg_id}")] for p in visible
+        [InlineKeyboardButton(p["name"], callback_data=f"{prefix}{p['uuid']}:{msg_id}")]
+        for p in visible
     ]
     if len(visible) < len(projects):
-        keyboard.append([InlineKeyboardButton("More...", callback_data=f"more:{msg_id}")])
+        keyboard.append([InlineKeyboardButton("More...", callback_data=f"{prefix}more:{msg_id}")])
     return InlineKeyboardMarkup(keyboard)
+
+
+async def _projects_for_picker(
+    context: CustomContext,
+    reply: Callable[[str], Awaitable[Any]],
+) -> list[Project] | None:
+    """The projects to offer in an inline picker: the live list, or the last known one
+    when the token has gone bad. Returns None — after explaining why through `reply` —
+    when there is nothing to show at all."""
+    try:
+        projects = await asyncio.to_thread(context.bot_data["claude_client"].list_projects)
+    except AuthError as e:
+        try:
+            projects = load_persisted_projects(context.bot_data["config"].storage.data_dir)
+        except PersistenceError as cache_err:
+            logger.exception("Failed to load persisted project list")
+            await reply(
+                f"Auth error: {e}\nAlso failed to load the cached project list: {cache_err}",
+            )
+            return None
+        if not projects:
+            await reply(f"Auth error: {e}")
+            return None
+        await reply("⚠️ Using last known project list — may not include newly created projects.")
+    if not projects:
+        await reply("No projects found. Use /refresh to reload your Claude projects.")
+        return None
+    return projects
 
 
 def _authenticated_user(update: Update, config: Config) -> User | None:
@@ -127,7 +172,8 @@ async def cmd_start(update: Update, context: CustomContext, user: User) -> None:
     await update.message.reply_text(
         "Send me a YouTube URL and I'll let you pick a Claude project to save the "
         "transcript to.\n\n"
-        "Commands: /inqueue — show queue contents, /refresh — reload project list, "
+        "Commands: /inqueue — show queue contents, /subscribed — list watched channels, "
+        "/subscribe <link> — watch a channel, /refresh — reload project list, "
         "/version — show running build, /help — show this message",
     )
 
@@ -205,6 +251,15 @@ async def drain_queue(
 _TELEGRAM_MAX_MESSAGE_LENGTH = 4096
 _INQUEUE_MAX_ENTRIES = 10  # per-section cap before a "+N more" trailer
 _STUCK_MARKER = "⚠️ "  # prefix for entries with upload_attempts > 0
+
+
+def _capped(text: str) -> str:
+    """Telegram rejects anything longer than 4096 characters outright, so a long listing
+    is truncated with a visible marker rather than being lost to a send failure."""
+    if len(text) <= _TELEGRAM_MAX_MESSAGE_LENGTH:
+        return text
+    note = "\n… (truncated)"
+    return text[: _TELEGRAM_MAX_MESSAGE_LENGTH - len(note)] + note
 
 
 def _fmt_ts(iso: str) -> str:
@@ -304,11 +359,241 @@ async def cmd_inqueue(update: Update, context: CustomContext, user: User) -> Non
         else:
             lines[-1] += ": empty"
 
-    text = "\n".join(lines)
-    if len(text) > _TELEGRAM_MAX_MESSAGE_LENGTH:
-        truncated_note = "\n… (truncated)"
-        text = text[: _TELEGRAM_MAX_MESSAGE_LENGTH - len(truncated_note)] + truncated_note
-    await update.message.reply_text(text, parse_mode="Markdown")
+    await update.message.reply_text(_capped("\n".join(lines)), parse_mode="Markdown")
+
+
+_SUBSCRIBE_PREFIX = "sub:"  # routes a project-picker callback to the subscribe handler
+_SUBSCRIBE_DEFAULT = "default"  # picker choice: inherit AUTO_TRANSCRIPT_PROJECT
+
+
+def _project_label(value: str, names: dict[str, str]) -> str:
+    """Channel entries and AUTO_TRANSCRIPT_PROJECT may hold either a project name or a
+    uuid — show the name where we can resolve one, the raw value otherwise."""
+    return names.get(value, value)
+
+
+async def _project_names(context: CustomContext) -> dict[str, str]:
+    """uuid -> project name, best effort. Display-only, so every failure degrades to an
+    empty mapping (callers fall back to printing the raw value) rather than an error:
+    not being able to name a project is no reason to refuse to list the channels."""
+    projects: list[Project] | None
+    try:
+        projects = await asyncio.to_thread(context.bot_data["claude_client"].list_projects)
+    except Exception:
+        logger.warning("Could not load the live project list for display", exc_info=True)
+        try:
+            projects = load_persisted_projects(context.bot_data["config"].storage.data_dir)
+        except PersistenceError:
+            logger.exception("Could not load the cached project list for display")
+            projects = None
+    return {p["uuid"]: p["name"] for p in projects or []}
+
+
+def _fmt_interval(seconds: int) -> str:
+    minutes = max(1, round(seconds / 60))
+    return f"{minutes // 60}h" if minutes >= 60 and minutes % 60 == 0 else f"{minutes} min"
+
+
+@_require_auth
+async def cmd_subscribed(update: Update, context: CustomContext, user: User) -> None:
+    if update.message is None:
+        return
+
+    config = context.bot_data["config"]
+    try:
+        channels = load_channels(config.poller.channels_path)
+    except PersistenceError as e:
+        logger.exception("Failed to read the channel list")
+        await update.message.reply_text(f"Couldn't read the channel list: {e}")
+        return
+
+    if not channels:
+        await update.message.reply_text(
+            "Not watching any channels yet. Add one with /subscribe <youtube link>.",
+        )
+        return
+
+    names = await _project_names(context)
+    default = config.poller.auto_transcript_project
+
+    lines = [f"📺 Watching {len(channels)} channel(s)", ""]
+    for ch in channels:
+        lines.append(f"• {ch.name} ({ch.handle})")
+        if ch.project:
+            lines.append(f"  → {_project_label(ch.project, names)}")
+        elif default:
+            lines.append(f"  → {_project_label(default, names)} (default)")
+        else:
+            lines.append("  → no project")
+
+    lines.append("")
+    if default:
+        lines.append(
+            f"Checked every {_fmt_interval(config.poller.poll_interval)}; "
+            "transcripts upload 24h after a video is published.",
+        )
+    else:
+        lines.append("⚠️ AUTO_TRANSCRIPT_PROJECT is not set — auto-upload is off.")
+
+    # Plain text, no parse_mode: channel names are arbitrary user-facing strings and this
+    # listing gains nothing from Markdown (see docs/bugs/unescaped-markdown-injection.md).
+    await update.message.reply_text(_capped("\n".join(lines)))
+
+
+def _subscribe_keyboard(
+    projects: list[Project],
+    msg_id: int | str,
+    config: Config,
+    *,
+    show_all: bool = False,
+) -> InlineKeyboardMarkup:
+    """The upload picker's keyboard, prefixed for the subscribe flow and topped with a
+    row for inheriting AUTO_TRANSCRIPT_PROJECT — the common case, since most channels
+    are watched for the same project."""
+    keyboard = (
+        _keyboard_for(projects, msg_id, _SUBSCRIBE_PREFIX)
+        if show_all
+        else _build_keyboard(
+            projects,
+            msg_id,
+            config.telegram.project_whitelist,
+            _SUBSCRIBE_PREFIX,
+        )
+    )
+    rows = [list(row) for row in keyboard.inline_keyboard]
+    default = config.poller.auto_transcript_project
+    if default:
+        names = {p["uuid"]: p["name"] for p in projects}
+        rows.insert(
+            0,
+            [
+                InlineKeyboardButton(
+                    f"Default ({_project_label(default, names)})",
+                    callback_data=f"{_SUBSCRIBE_PREFIX}{_SUBSCRIBE_DEFAULT}:{msg_id}",
+                ),
+            ],
+        )
+    return InlineKeyboardMarkup(rows)
+
+
+@_require_auth
+async def cmd_subscribe(update: Update, context: CustomContext, user: User) -> None:
+    if update.message is None or context.user_data is None:
+        return
+
+    args = context.args or []
+    if not args:
+        await update.message.reply_text(
+            "Usage: /subscribe <youtube link>\n\n"
+            "Send a link to any video from the channel (or the channel's @handle) and "
+            "I'll watch it for new uploads.",
+        )
+        return
+
+    config = context.bot_data["config"]
+    await update.message.reply_text("Looking up the channel...")
+    try:
+        resolved = await asyncio.to_thread(resolve_subscription, args[0], config.transcript.proxy)
+    except SubscriptionError as e:
+        await update.message.reply_text(str(e))
+        return
+
+    try:
+        channels = load_channels(config.poller.channels_path)
+    except PersistenceError as e:
+        logger.exception("Failed to read the channel list")
+        await update.message.reply_text(f"Couldn't read the channel list: {e}")
+        return
+    existing = find_subscription(channels, resolved)
+    if existing is not None:
+        await update.message.reply_text(
+            f"Already watching {existing.name} ({existing.handle}). See /subscribed.",
+        )
+        return
+
+    projects = await _projects_for_picker(context, update.message.reply_text)
+    if projects is None:
+        return
+
+    msg_id = update.message.message_id
+    context.user_data[f"subscribe_{msg_id}"] = resolved
+    await update.message.reply_text(
+        f"Found {resolved.name} ({resolved.handle}).\n\nWhere should its transcripts go?",
+        reply_markup=_subscribe_keyboard(projects, msg_id, config),
+    )
+
+
+@_require_auth
+async def handle_subscribe_selection(update: Update, context: CustomContext, user: User) -> None:
+    query = update.callback_query
+    if query is None or context.user_data is None or query.data is None:
+        return
+
+    await query.answer()
+
+    parts = query.data.removeprefix(_SUBSCRIBE_PREFIX).split(":", 1)
+    if len(parts) != 2:
+        await query.edit_message_text("Invalid selection data.")
+        return
+    choice, msg_id_str = parts
+    config = context.bot_data["config"]
+
+    if choice == "more":
+        try:
+            projects = await asyncio.to_thread(context.bot_data["claude_client"].list_projects)
+        except AuthError as e:
+            await query.answer(str(e)[:200])
+            return
+        await query.edit_message_reply_markup(
+            reply_markup=_subscribe_keyboard(projects, msg_id_str, config, show_all=True),
+        )
+        return
+
+    resolved: ResolvedChannel | None = context.user_data.get(f"subscribe_{msg_id_str}")
+    if resolved is None:
+        await query.edit_message_text("Session expired. Please run /subscribe again.")
+        return
+
+    project = None if choice == _SUBSCRIBE_DEFAULT else choice
+    try:
+        added = await asyncio.to_thread(
+            add_subscription,
+            config.poller.channels_path,
+            resolved,
+            project,
+        )
+    except PersistenceError as e:
+        logger.exception("Failed to add %s to the channel list", resolved.handle)
+        await query.edit_message_text(f"Couldn't save the subscription: {e}")
+        return
+
+    context.user_data.pop(f"subscribe_{msg_id_str}", None)
+    if added is None:
+        # Someone (or something) added the same channel between the /subscribe check
+        # and this tap — the end state is what the user wanted either way.
+        await query.edit_message_text(f"Already watching {resolved.name}.")
+        return
+
+    logger.info(
+        "Subscribed to %s (%s) -> project %s",
+        added.name,
+        added.channel_id,
+        project or "default",
+    )
+    lines = [f"✅ Watching {added.name} ({added.handle})."]
+    default = config.poller.auto_transcript_project
+    if default is None:
+        # Without it the poller task never starts at all (see main.py), so a per-channel
+        # project of its own wouldn't get this channel uploaded either.
+        lines.append("⚠️ AUTO_TRANSCRIPT_PROJECT is not set — auto-upload is off until it is.")
+    else:
+        names = await _project_names(context)
+        lines.append(
+            f"New videos go to {_project_label(project or default, names)}, "
+            f"picked up within {_fmt_interval(config.poller.poll_interval)} and uploaded "
+            "24h after publication.",
+        )
+    await query.edit_message_text("\n".join(lines))
 
 
 @_require_auth
@@ -335,27 +620,8 @@ async def handle_youtube_url(update: Update, context: CustomContext, user: User)
         await update.message.reply_text(f"Failed to fetch video info: {e}")
         return
 
-    try:
-        projects = await asyncio.to_thread(context.bot_data["claude_client"].list_projects)
-    except AuthError as e:
-        try:
-            projects = load_persisted_projects(context.bot_data["config"].storage.data_dir)
-        except PersistenceError as cache_err:
-            logger.exception("Failed to load persisted project list")
-            await update.message.reply_text(
-                f"Auth error: {e}\nAlso failed to load the cached project list: {cache_err}",
-            )
-            return
-        if not projects:
-            await update.message.reply_text(f"Auth error: {e}")
-            return
-        await update.message.reply_text(
-            "⚠️ Using last known project list — may not include newly created projects.",
-        )
-    if not projects:
-        await update.message.reply_text(
-            "No projects found. Use /refresh to reload your Claude projects.",
-        )
+    projects = await _projects_for_picker(context, update.message.reply_text)
+    if projects is None:
         return
 
     msg_id = update.message.message_id
@@ -793,10 +1059,17 @@ def build_application(config: Config) -> Application:
     app.add_handler(CommandHandler("inqueue", cmd_inqueue))
     app.add_handler(CommandHandler("refresh", cmd_refresh))
     app.add_handler(CommandHandler("version", cmd_version))
+    app.add_handler(CommandHandler("subscribe", cmd_subscribe))
+    app.add_handler(CommandHandler("subscribed", cmd_subscribed))
     app.add_handler(
         MessageHandler(filters.TEXT & filters.Regex(YOUTUBE_URL_PATTERN), handle_youtube_url),
     )
+    # Both prefixed handlers must be registered before the catch-all project picker,
+    # which matches any callback data.
     app.add_handler(CallbackQueryHandler(handle_duplicate_choice, pattern=r"^(skip|overwrite):"))
+    app.add_handler(
+        CallbackQueryHandler(handle_subscribe_selection, pattern=f"^{_SUBSCRIBE_PREFIX}"),
+    )
     app.add_handler(CallbackQueryHandler(handle_project_selection))
 
     return app
