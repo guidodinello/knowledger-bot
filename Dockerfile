@@ -24,9 +24,28 @@ COPY channels.json .
 RUN uv sync --frozen --no-dev && mkdir -p /app/data
 ENV DATA_DIR=/app/data
 
+# Run unprivileged. Nothing here needs root: the HTTP token endpoint binds 8080 (above
+# the privileged range), and the only writes go to DATA_DIR.
+#
+# The uid/gid is pinned to 1001 to match the `ubuntu` account on the deployment host,
+# because DATA_DIR is bind-mounted out of that user's home. The match is not cosmetic:
+# claude_client writes session_token.json with mode 0o600, and config._load_persisted_token
+# fails closed if it cannot be read, so a mismatched uid would crash the bot at startup
+# rather than degrade. Existing state files are root-owned from when this ran as root, so
+# deploy.sh and the CI deploy chown DATA_DIR before starting the container.
+RUN groupadd --gid 1001 appuser \
+    && useradd --uid 1001 --gid 1001 --create-home --shell /usr/sbin/nologin appuser \
+    && chown -R appuser:appuser /app
+
+# Invoke the venv interpreter directly instead of going through `uv run`: uv requires a
+# writable cache (/.cache/uv) and aborts with a permission error for a non-root user.
+ENV PATH="/app/.venv/bin:$PATH"
+
 ARG GIT_SHA=
 ARG GIT_COMMIT_DATE=
 ENV GIT_SHA=${GIT_SHA}
 ENV GIT_COMMIT_DATE=${GIT_COMMIT_DATE}
 
-CMD ["uv", "run", "python", "main.py"]
+USER appuser
+
+CMD ["python", "main.py"]

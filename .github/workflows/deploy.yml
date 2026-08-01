@@ -81,6 +81,11 @@ jobs:
             IMAGE=ghcr.io/${{ github.repository_owner }}/knowledger:${{ needs.build.outputs.short_sha }}
             cd /home/ubuntu/knowledger-bot
             docker pull "$IMAGE"
+            # The container runs as uid 1001 (see Dockerfile). State files written by
+            # earlier root-running versions are owned by uid 0, and session_token.json is
+            # mode 0600 whose unreadability is a fail-closed startup error — so ownership
+            # must be corrected before the new container starts, not after. Idempotent.
+            sudo chown -R 1001:1001 /home/ubuntu/knowledger-bot/data
             docker rm -f knowledger || true
             docker run -d --name knowledger \
               --restart unless-stopped \

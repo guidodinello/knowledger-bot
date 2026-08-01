@@ -45,6 +45,11 @@ inspect() {
 }
 
 recreate() {
+    # Correct ownership before starting: the container runs as uid 1001 (see Dockerfile),
+    # while state files from earlier root-running versions are owned by uid 0.
+    # session_token.json is mode 0600 and an unreadable one is a fail-closed startup
+    # error, so this must happen before the container comes up, not after. Idempotent.
+    $SSH "sudo chown -R 1001:1001 \$HOME/knowledger-bot/data"
     $SSH "mkdir -p \$HOME/knowledger-bot/data && cd $REMOTE_DIR && docker rm -f knowledger; docker run -d --name knowledger --restart unless-stopped --network=host --env-file .env -v \$HOME/knowledger-bot/cookies.txt:/app/cookies.txt:ro -v \$HOME/knowledger-bot/data:/app/data --log-opt max-size=10m --log-opt max-file=3 knowledger"
     echo "Waiting for bot to start..."
     $SSH "docker logs -f knowledger 2>&1 | grep -m1 'Application started'"
