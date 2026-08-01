@@ -27,7 +27,7 @@ from .history import UploadRecord, record_upload
 from .logger import get_logger
 from .persistence import CorruptDataError, PersistenceError, atomic_write_json, load_json
 from .queue import Queue, QueueEntry, build_auth_fallback_entry
-from .telegram_format import PARSE_MODE, subject
+from .telegram_format import NO_PREVIEW, PARSE_MODE, subject
 from .transcript import TranscriptTransportError, TranscriptUnavailable, fetch_transcript
 from .upload_service import (
     AlreadyExists,
@@ -150,24 +150,24 @@ async def _notify_chat(
     itself failing — the transcript is already safely handled by this point, only
     the user-facing confirmation would be missing."""
     try:
-        await app.bot.send_message(chat_id, text, parse_mode=parse_mode)
+        await app.bot.send_message(
+            chat_id,
+            text,
+            parse_mode=parse_mode,
+            link_preview_options=NO_PREVIEW,
+        )
     except Exception:
         logger.warning("Failed to notify chat %d", chat_id, exc_info=True)
 
 
-def _token_expired_message(entry: PendingTranscript, *, newly_queued: bool) -> str:
-    """Both auth-blocked paths below (the doc listing and the upload itself) leave the
-    user in exactly the same position, so they say exactly the same thing."""
+def token_expired_message(subject_line: str, *, newly_queued: bool) -> str:
+    """The shared copy for every auth-blocked transcript that made it into Queue."""
     tail = (
         "Update your Claude session token, then run /refresh."
         if newly_queued
         else "It was already queued — update your token, then run /refresh."
     )
-    return (
-        "⏳ Waiting on a valid token\n"
-        + subject(entry.video_title, entry.channel_name, entry.video_id)
-        + f"\n\n{tail}"
-    )
+    return f"⏳ Waiting on a valid token\n{subject_line}\n\n{tail}"
 
 
 async def _drain_one(
@@ -219,7 +219,10 @@ async def _drain_one(
             await _notify_chat(
                 app,
                 entry.chat_id,
-                _token_expired_message(entry, newly_queued=added is not None),
+                token_expired_message(
+                    subject(entry.video_title, entry.channel_name, entry.video_id),
+                    newly_queued=added is not None,
+                ),
                 parse_mode=PARSE_MODE,
             )
             return
@@ -274,7 +277,10 @@ async def _drain_one(
             await _notify_chat(
                 app,
                 entry.chat_id,
-                _token_expired_message(entry, newly_queued=added is not None),
+                token_expired_message(
+                    subject(entry.video_title, entry.channel_name, entry.video_id),
+                    newly_queued=added is not None,
+                ),
                 parse_mode=PARSE_MODE,
             )
         case RetryPending(step=step, error=error):

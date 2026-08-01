@@ -5,6 +5,7 @@ from types import SimpleNamespace
 from typing import Any
 
 import pytest
+from curl_cffi.requests.exceptions import RequestException
 from telegram import InlineKeyboardMarkup
 
 from knowledger.bot import cmd_subscribe, cmd_subscribed, handle_subscribe_selection
@@ -231,6 +232,26 @@ def test_subscribe_rejects_a_link_that_isnt_youtube(tmp_path: Path) -> None:
     assert "doesn't look like a YouTube link" in message.replies[-1]
 
 
+def test_subscribe_reports_a_project_list_network_failure(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    config = _config(tmp_path)
+    _patch_resolution(monkeypatch, ResolvedChannel("@Cava", "José Luis Cava", "UC1"))
+    message = FakeMessage()
+    context = FakeContext(config, args=["https://www.youtube.com/watch?v=abc"])
+
+    def fail() -> list[dict]:
+        raise RequestException("Claude unavailable")
+
+    monkeypatch.setattr(context.bot_data["claude_client"], "list_projects", fail)
+
+    asyncio.run(cmd_subscribe(FakeUpdate(message), context))  # type: ignore[arg-type]
+
+    assert "Couldn't reach Claude to load your projects" in message.replies[-1]
+    assert "subscribe_7" not in context.user_data
+
+
 def _patch_resolution(monkeypatch: pytest.MonkeyPatch, resolved: ResolvedChannel) -> None:
     monkeypatch.setattr("knowledger.bot.resolve_subscription", lambda url, proxy: resolved)
 
@@ -355,6 +376,24 @@ def test_more_reveals_every_project_without_writing_anything(tmp_path: Path) -> 
     assert _callbacks(query.markups[-1]) == ["sub:default:42", "sub:inv-uuid:42", "sub:gym-uuid:42"]
     assert not config.poller.channels_path.exists()
     assert "subscribe_42" in context.user_data  # still waiting for a real choice
+
+
+def test_more_reports_a_project_list_network_failure(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    query = FakeQuery("sub:more:42")
+    context = FakeContext(_config(tmp_path))
+
+    def fail() -> list[dict]:
+        raise RequestException("Claude unavailable")
+
+    monkeypatch.setattr(context.bot_data["claude_client"], "list_projects", fail)
+
+    asyncio.run(handle_subscribe_selection(FakeUpdate(query=query), context))  # type: ignore[arg-type]
+
+    assert "Couldn't reach Claude to load your projects" in query.edits[-1]
+    assert query.markups == []
 
 
 if __name__ == "__main__":

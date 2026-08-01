@@ -17,7 +17,14 @@ from defusedxml.ElementTree import ParseError
 
 from .config import ProxyConfig
 from .logger import get_logger
-from .poller import Channel, fetch_feed, load_channels, resolve_channel_id, save_channels
+from .poller import (
+    Channel,
+    channels_file_lock,
+    fetch_feed,
+    load_channels,
+    resolve_channel_id,
+    save_channels,
+)
 from .youtube import extract_channel_handle, extract_video_id, fetch_video_metadata
 
 logger = get_logger(__name__)
@@ -119,19 +126,20 @@ def add_subscription(
 ) -> Channel | None:
     """Append the channel to ``channels.json``, or return None if it's already there.
 
-    Re-reads the file immediately before writing rather than trusting the copy the
-    command handler read earlier, so a channel the poller resolved an id for in the
-    meantime isn't clobbered. `project` is a Claude project uuid, or None to inherit
+    Holds the same filesystem lock as the poller's id-backfill transaction while it
+    loads, checks, appends, and saves, so neither writer can overwrite the other's
+    update. `project` is a Claude project uuid, or None to inherit
     `AUTO_TRANSCRIPT_PROJECT`."""
-    channels = load_channels(path)
-    if find_subscription(channels, resolved) is not None:
-        return None
-    channel = Channel(
-        handle=resolved.handle,
-        name=resolved.name,
-        channel_id=resolved.channel_id,
-        project=project,
-    )
-    channels.append(channel)
-    save_channels(path, channels)
+    with channels_file_lock(path):
+        channels = load_channels(path)
+        if find_subscription(channels, resolved) is not None:
+            return None
+        channel = Channel(
+            handle=resolved.handle,
+            name=resolved.name,
+            channel_id=resolved.channel_id,
+            project=project,
+        )
+        channels.append(channel)
+        save_channels(path, channels)
     return channel

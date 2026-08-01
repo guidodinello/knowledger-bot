@@ -8,7 +8,7 @@ than a per-interpolation obligation, so this whole bug class (this doc and
 recur. `/inqueue` also no longer prints the raw on-disk filenames at all.
 
 **Severity:** Low
-**File:** `knowledger/bot.py:195-239` (`cmd_inqueue`)
+**File:** `knowledger/bot.py` (`cmd_inqueue`, historical implementation)
 
 ## Description
 

@@ -24,15 +24,18 @@ from knowledger.pending_transcripts import (
 )
 from knowledger.persistence import CorruptDataError
 from knowledger.queue import Queue, QueueEntry
+from knowledger.telegram_format import NO_PREVIEW
 from knowledger.transcript import TranscriptTransportError, TranscriptUnavailable
 
 
 class FakeBot:
     def __init__(self) -> None:
         self.sent: list[tuple[int, str]] = []
+        self.options: list[dict] = []
 
     async def send_message(self, chat_id, text, parse_mode=None, **kwargs) -> None:
         self.sent.append((chat_id, text))
+        self.options.append(kwargs)
 
 
 class FakeTelegramApp:
@@ -244,6 +247,7 @@ def test_successful_retry_uploads_and_notifies_and_drops_entry(tmp_path: Path) -
     assert client.docs["p"] == [{"uuid": "u1", "file_name": "f1"}]
     assert len(app.bot.sent) == 1
     assert "Title" in app.bot.sent[0][1]
+    assert app.bot.options[0]["link_preview_options"] == NO_PREVIEW
 
     # A transcript that was transiently blocked and later retried successfully must
     # still show up in the weekly recap history — this is a real upload, just a

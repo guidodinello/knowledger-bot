@@ -20,7 +20,11 @@ from .claude_client import AuthError, ClaudeClient, Doc, Project
 from .config import Config, load_persisted_projects
 from .history import UploadRecord, record_upload
 from .logger import get_logger
-from .pending_transcripts import PendingTranscript, PendingTranscriptStore
+from .pending_transcripts import (
+    PendingTranscript,
+    PendingTranscriptStore,
+    token_expired_message,
+)
 from .persistence import PersistenceError
 from .poller import UPLOAD_DELAY, PollerState, load_channels
 from .queue import Queue, QueueEntry
@@ -76,7 +80,9 @@ class PendingUpload(TypedDict):
 
 CustomContext = CallbackContext[Any, dict, dict, BotData]
 
-YOUTUBE_URL_PATTERN = r"https?://(www\.)?(youtube\.com/watch|youtu\.be/|youtube\.com/shorts/)\S+"
+YOUTUBE_URL_PATTERN = (
+    r"https?://(?:(?:www|m)\.)?(?:youtube\.com/(?:watch|shorts/)|youtu\.be/)\S+"
+)
 
 
 def _keyboard_for(
@@ -125,6 +131,7 @@ _AUTH_EXPIRED = (
     "Your Claude session token has expired, so I can't reach your projects. "
     "Update the token, then run /refresh."
 )
+_PROJECTS_UNREACHABLE = "Couldn't reach Claude to load your projects. Try again in a moment."
 # Two variants rather than one shared string: the recovery step differs by flow, and
 # telling someone in the subscribe flow to "send the link again" sends them somewhere
 # that won't finish what they started.
@@ -160,6 +167,10 @@ async def _projects_for_picker(
             await reply(_AUTH_EXPIRED)
             return None
         return projects, _STALE_LIST_WARNING
+    except RequestException:
+        logger.exception("Failed to load project list for picker")
+        await reply(_PROJECTS_UNREACHABLE)
+        return None
     if not projects:
         await reply("No projects found. Run /refresh to reload them from Claude.")
         return None
@@ -338,7 +349,7 @@ async def cmd_inqueue(update: Update, context: CustomContext, user: User) -> Non
         entry_lines = []
         for e in retry_entries:
             marker = _STUCK_MARKER if e.upload_attempts else ""
-            title = video_link(e.video_title or e.file_name, e.video_id)
+            title = video_link(e.video_title, e.video_id)
             attempts = f" — {e.upload_attempts} failed attempts" if e.upload_attempts else ""
             detail = f"  queued {fmt_ts(e.queued_at)}"
             if e.upload_attempts:
@@ -504,26 +515,13 @@ async def cmd_subscribed(update: Update, context: CustomContext, user: User) -> 
     await update.message.reply_text(cap_message("\n".join(lines)), parse_mode=PARSE_MODE)
 
 
-def _subscribe_keyboard(
+def _with_subscribe_default(
+    keyboard: InlineKeyboardMarkup,
     projects: list[Project],
     msg_id: int | str,
     config: Config,
-    *,
-    show_all: bool = False,
 ) -> InlineKeyboardMarkup:
-    """The upload picker's keyboard, prefixed for the subscribe flow and topped with a
-    row for inheriting AUTO_TRANSCRIPT_PROJECT — the common case, since most channels
-    are watched for the same project."""
-    keyboard = (
-        _keyboard_for(projects, msg_id, _SUBSCRIBE_PREFIX)
-        if show_all
-        else _build_keyboard(
-            projects,
-            msg_id,
-            config.telegram.project_whitelist,
-            _SUBSCRIBE_PREFIX,
-        )
-    )
+    """Top a subscribe-flow project keyboard with the global-default choice."""
     rows = [list(row) for row in keyboard.inline_keyboard]
     default = config.poller.auto_transcript_project
     if default:
@@ -538,6 +536,31 @@ def _subscribe_keyboard(
             ],
         )
     return InlineKeyboardMarkup(rows)
+
+
+def _subscribe_keyboard(
+    projects: list[Project],
+    msg_id: int | str,
+    config: Config,
+) -> InlineKeyboardMarkup:
+    """Whitelist-filtered subscribe picker, including the global-default choice."""
+    keyboard = _build_keyboard(
+        projects,
+        msg_id,
+        config.telegram.project_whitelist,
+        _SUBSCRIBE_PREFIX,
+    )
+    return _with_subscribe_default(keyboard, projects, msg_id, config)
+
+
+def _all_subscribe_keyboard(
+    projects: list[Project],
+    msg_id: int | str,
+    config: Config,
+) -> InlineKeyboardMarkup:
+    """Unfiltered subscribe picker shown after the user taps “More…”."""
+    keyboard = _keyboard_for(projects, msg_id, _SUBSCRIBE_PREFIX)
+    return _with_subscribe_default(keyboard, projects, msg_id, config)
 
 
 @_require_auth
@@ -620,8 +643,12 @@ async def handle_subscribe_selection(update: Update, context: CustomContext, use
             # dead-token tap would appear to do nothing. Report in the message instead.
             await query.edit_message_text(_AUTH_EXPIRED)
             return
+        except RequestException:
+            logger.exception("Failed to load full project list for subscribe picker")
+            await query.edit_message_text(_PROJECTS_UNREACHABLE)
+            return
         await query.edit_message_reply_markup(
-            reply_markup=_subscribe_keyboard(projects, msg_id_str, config, show_all=True),
+            reply_markup=_all_subscribe_keyboard(projects, msg_id_str, config),
         )
         return
 
@@ -757,6 +784,10 @@ async def handle_project_selection(update: Update, context: CustomContext, user:
                 projects = await asyncio.to_thread(context.bot_data["claude_client"].list_projects)
             except AuthError:
                 await query.edit_message_text(_AUTH_EXPIRED)
+                return
+            except RequestException:
+                logger.exception("Failed to load full project list for upload picker")
+                await query.edit_message_text(_PROJECTS_UNREACHABLE)
                 return
             keyboard = _keyboard_for(projects, msg_id_str)
             await query.edit_message_reply_markup(reply_markup=keyboard)
@@ -929,13 +960,8 @@ async def handle_project_selection(update: Update, context: CustomContext, user:
                     "for later. Update the token and send the link again.",
                 )
                 return
-            tail = (
-                "Update your Claude session token, then run /refresh."
-                if added
-                else "It was already queued — update your token, then run /refresh."
-            )
             await query.edit_message_text(
-                f"⏳ Waiting on a valid token\n{subject_line}\n\n{tail}",
+                token_expired_message(subject_line, newly_queued=added is not None),
                 parse_mode=PARSE_MODE,
                 link_preview_options=NO_PREVIEW,
             )

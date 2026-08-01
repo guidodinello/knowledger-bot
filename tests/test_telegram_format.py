@@ -74,6 +74,15 @@ def test_cap_message_falls_back_to_plain_text_for_one_enormous_line() -> None:
     assert capped.endswith("… (truncated)")
 
 
+def test_cap_message_never_splits_an_entity_in_one_enormous_line() -> None:
+    capped = cap_message("<b>" + "&" * 5000 + "</b>")
+    escaped_prefix = capped.removesuffix("\n… (truncated)")
+
+    assert len(capped) <= TELEGRAM_MAX_MESSAGE_LENGTH
+    assert escaped_prefix.endswith("&amp;")
+    assert escaped_prefix.count("&") == escaped_prefix.count("&amp;")
+
+
 def test_cap_entries_reports_what_it_dropped() -> None:
     entries = [[f"• {i}", f"  detail {i}"] for i in range(5)]
 

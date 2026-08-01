@@ -54,12 +54,12 @@ def resolve_subscription(url: str, proxy: ProxyConfig | None = None) -> Resolved
 Failures raise `SubscriptionError`, whose message is written to be shown in Telegram
 verbatim ("Try again in a minute", not "NoneType has no attribute").
 
-`add_subscription()` re-reads `channels.json` immediately before appending rather than
-trusting the copy the command handler read a few seconds earlier — the poller writes the
-same file when it backfills a `channel_id`, and this is the cheap way to not clobber
-that. It returns None if the channel is already present, matching on **either** id or
-handle: a hand-written entry may have no id yet, and a channel that changed its handle
-still matches by id.
+`add_subscription()` performs its load/check/append/save under the same filesystem lock
+used by the poller's `channel_id` backfill. The backfill's final write also uses an
+atomic replace-existing operation, so a concurrent append cannot be clobbered and a
+channel file deleted in flight is not recreated as `[]`. It returns None if the channel
+is already present, matching on **either** id or handle: a hand-written entry may have
+no id yet, and a channel that changed its handle still matches by id.
 
 ### 2. Making the watch list live — `knowledger/poller.py`
 
@@ -107,9 +107,10 @@ Nothing is written until a project is picked, and the resolved channel lives in
 `user_data` between the two steps, exactly like the pending video in the upload flow
 (so a tap on a picker from before a restart answers "Session expired", not a traceback).
 
-Both replies are plain text, no `parse_mode`: channel names are arbitrary strings from
-YouTube and there is nothing here Markdown would add — see
-`docs/bugs/unescaped-markdown-injection.md` for the class of bug this avoids.
+Both replies use HTML parse mode for consistent emphasis. Every arbitrary channel/project
+name is passed through `telegram_format.esc()` (and video mentions through `subject()`),
+so YouTube-provided strings cannot become markup — see
+`docs/bugs/unescaped-markdown-injection.md` for the bug class this centralization avoids.
 
 The `_projects_for_picker()` helper that `/subscribe` uses for its picker is the same
 live-list-then-cached-list-then-give-up logic `handle_youtube_url` already had inline;
@@ -157,8 +158,10 @@ Where should its transcripts go?
   mid-flight), so it can be added when it's actually wanted.
 - **Editing an existing subscription's project.** Same reasoning; today it's a one-line
   edit of `channels.json`, and the poller now picks that edit up without a restart.
-- **Registering the commands with BotFather.** Unchanged from `/version`: the repo has
-  no `post_init` hook, so every command is registered by hand.
+- **BotFather-side command setup.** Commands are registered programmatically at startup:
+  `build_application()` installs the `_register_commands` `post_init` hook, which calls
+  `set_my_commands` from the same command list used by `/help`; no manual BotFather edit
+  is part of this feature.
 - **Immediate first poll after subscribing.** A new channel is picked up within one
   `POLL_INTERVAL_SECONDS`, and the first upload waits 24h after publication anyway —
   triggering a tick on subscribe would buy nothing real.

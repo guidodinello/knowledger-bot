@@ -92,13 +92,33 @@ def truncate(text: str, limit: int = TITLE_LIMIT) -> str:
 
 
 def _strip_tags(markup: str) -> str:
-    """Reduce a fragment of our own markup back to escaped plain text — the only way to
-    truncate mid-line without risking a severed tag."""
-    return esc(html.unescape(_TAG_RE.sub("", markup)))
+    """Reduce a fragment of our own markup back to raw plain text."""
+    return html.unescape(_TAG_RE.sub("", markup))
+
+
+def _escape_prefix(text: str, budget: int) -> str:
+    """Escape as much raw text as fits without ever splitting an HTML entity."""
+    parts: list[str] = []
+    used = 0
+    for char in text:
+        escaped = esc(char)
+        if used + len(escaped) > budget:
+            break
+        parts.append(escaped)
+        used += len(escaped)
+    return "".join(parts)
+
+
+def cap_plain_message(text: str) -> str:
+    """Fit unparsed text inside Telegram's limit without HTML transformations."""
+    if len(text) <= TELEGRAM_MAX_MESSAGE_LENGTH:
+        return text
+    budget = TELEGRAM_MAX_MESSAGE_LENGTH - len(_TRUNCATION_NOTE)
+    return text[:budget] + _TRUNCATION_NOTE
 
 
 def cap_message(text: str) -> str:
-    """Fit a message inside Telegram's hard 4096-character limit.
+    """Fit an HTML message inside Telegram's hard 4096-character limit.
 
     Drops whole lines from the end rather than slicing at a byte offset: under HTML a
     cut through `<a href="...">` makes Telegram reject the *entire* message, so a
@@ -117,9 +137,9 @@ def cap_message(text: str) -> str:
         used += extra
 
     if not kept:
-        # Degenerate case: even the first line overflows on its own. Falling back to
-        # tag-stripped plain text keeps the output valid HTML at any cut point.
-        return _strip_tags(text)[:budget] + _TRUNCATION_NOTE
+        # Degenerate case: even the first line overflows on its own. Strip our tags,
+        # then escape raw characters into the remaining budget so no entity is severed.
+        return _escape_prefix(_strip_tags(text), budget) + _TRUNCATION_NOTE
     return "\n".join(kept) + _TRUNCATION_NOTE
 
 

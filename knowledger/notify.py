@@ -2,7 +2,7 @@ from telegram.ext import Application
 
 from .config import Config
 from .logger import get_logger
-from .telegram_format import NO_PREVIEW, PARSE_MODE
+from .telegram_format import NO_PREVIEW, PARSE_MODE, cap_message, cap_plain_message
 
 logger = get_logger(__name__)
 
@@ -16,11 +16,9 @@ async def notify(
 ) -> None:
     """Broadcast to every allowed user. Defaults to HTML so callers get links and
     emphasis without restating the parse mode; pass None for text that was not built
-    with the telegram_format helpers.
-
-    Every caller must pass `text` through `cap_message` — a message over Telegram's
-    4096-character limit is rejected, and the failure is swallowed below, so an
-    over-long broadcast would simply never arrive."""
+    with the telegram_format helpers. Messages are capped here because send failures
+    are intentionally best-effort and an over-long broadcast must not disappear."""
+    text = cap_plain_message(text) if parse_mode is None else cap_message(text)
     for uid in config.telegram.allowed_user_ids:
         try:
             await app.bot.send_message(

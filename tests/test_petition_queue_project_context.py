@@ -5,6 +5,7 @@ from types import SimpleNamespace
 from typing import cast
 
 import pytest
+from curl_cffi.requests.exceptions import RequestException
 from telegram import Update
 
 from knowledger.bot import CustomContext, handle_project_selection, handle_youtube_url
@@ -17,8 +18,10 @@ from knowledger.config import (
     TelegramSettings,
     load_persisted_projects,
 )
+from knowledger.pending_transcripts import token_expired_message
 from knowledger.persistence import CorruptDataError
 from knowledger.queue import Queue
+from knowledger.telegram_format import subject
 from knowledger.youtube import VideoMetadata
 
 
@@ -309,6 +312,28 @@ def test_handle_youtube_url_fails_closed_on_corrupt_persisted_cache(
     assert "/refresh" in message.replies[-1]
 
 
+
+def test_upload_more_reports_a_project_list_network_failure(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    client = FakeClaudeClient()
+
+    def fail() -> list[dict]:
+        raise RequestException("Claude unavailable")
+
+    monkeypatch.setattr(client, "list_projects", fail)
+    query = FakeQuery(data="more:1")
+    update = FakeUpdate(callback_query=query)
+    context = FakeContext(
+        bot_data={"config": _config(tmp_path), "claude_client": client},
+    )
+
+    asyncio.run(handle_project_selection(cast(Update, update), cast(CustomContext, context)))
+
+    assert "Couldn't reach Claude to load your projects" in query.edits[-1]
+
+
 # --- handle_project_selection: dedup-check AuthError falls through ----------------
 
 
@@ -343,7 +368,10 @@ def test_dedup_check_auth_error_falls_through_to_queue(
 
     asyncio.run(handle_project_selection(cast(Update, update), cast(CustomContext, context)))
 
-    assert "waiting on a valid token" in query.edits[-1].lower()
+    assert query.edits[-1] == token_expired_message(
+        subject("Title", "Channel", "v1"),
+        newly_queued=True,
+    )
     entries = queue.peek()
     assert len(entries) == 1
     assert entries[0].project_id == "p1"

@@ -132,21 +132,28 @@ def fetch_video_metadata(url: str, proxy: ProxyConfig | None = None) -> VideoMet
         raise ValueError("This video is private, age-restricted, or unavailable.")
     response.raise_for_status()
     data = response.json()
+    if not isinstance(data, dict):
+        raise ValueError("YouTube returned malformed video metadata.")
+    oembed_title = data.get("title")
+    channel_name = data.get("author_name")
+    if not isinstance(oembed_title, str) or not isinstance(channel_name, str):
+        raise ValueError("YouTube returned incomplete video metadata.")
 
     try:
         page_title, upload_date = _fetch_page_data(video_id, proxy=proxy)
-        title = page_title or data["title"]
+        title = page_title or oembed_title
     except (RequestException, ValueError):
         logger.exception("Could not fetch full page title for %s, using oEmbed title", video_id)
-        title = data["title"]
+        title = oembed_title
         upload_date = None
 
+    channel_url = data.get("author_url")
     return VideoMetadata(
         video_id=video_id,
         title=title,
-        channel_name=data["author_name"],
+        channel_name=channel_name,
         upload_date=upload_date,
-        channel_url=data.get("author_url"),
+        channel_url=channel_url if isinstance(channel_url, str) else None,
     )
 
 
