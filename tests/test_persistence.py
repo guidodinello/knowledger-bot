@@ -71,6 +71,20 @@ def test_atomic_write_json_if_exists_does_not_create_a_missing_file(tmp_path: Pa
     assert not path.with_suffix(".tmp").exists()
 
 
+def test_atomic_write_json_if_exists_declines_a_file_deleted_beforehand(
+    tmp_path: Path,
+) -> None:
+    """The write must not resurrect a file that was removed, which is the whole reason
+    this variant exists rather than plain atomic_write_json."""
+    path = tmp_path / "channels.json"
+    atomic_write_json(path, [{"handle": "@x"}])
+    path.unlink()
+
+    assert atomic_write_json_if_exists(path, [{"handle": "@x", "channel_id": "UC1"}]) is False
+    assert not path.exists()
+    assert not path.with_suffix(".tmp").exists()
+
+
 def test_atomic_write_json_failure_leaves_destination_untouched(tmp_path: Path) -> None:
     path = tmp_path / "missing-dir" / "f.json"
     with pytest.raises(PersistenceIOError):
