@@ -9,3 +9,5 @@
   → refined: [features/weekly-recap.md](../features/weekly-recap.md)
 - add a /version command that prints the git commit hash and the date of the last commit, so we can know which version is running in production
   → refined: [features/version-command.md](../features/version-command.md)
+- add /subscribed command to show the channels we are suscribed to for the auto upload. same with a /suscribe command to add a new channel, maybe using an url to a video of the channel
+  → refined: [features/subscribe-commands.md](../features/subscribe-commands.md)

@@ -13,7 +13,6 @@ import re
 from dataclasses import asdict, dataclass, field, replace
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
-from typing import cast
 
 from curl_cffi import requests
 from curl_cffi.requests.exceptions import RequestException
@@ -130,7 +129,7 @@ def load_channels(path: Path) -> list[Channel]:
         raise CorruptDataError(path, f"malformed channel entry: {e}") from e
 
 
-def _save_channels(path: Path, channels: list[Channel]) -> None:
+def save_channels(path: Path, channels: list[Channel]) -> None:
     # Convert to dicts and remove project field if None to avoid writing "project": null
     channel_dicts = []
     for c in channels:
@@ -213,34 +212,107 @@ def fetch_feed(channel_id: str, proxy: ProxyConfig | None = None) -> list[Pendin
 
 
 def _resolve_missing_ids(channels: list[Channel], path: Path, proxy: ProxyConfig | None) -> None:
-    """Backfill any null channel_id from its handle and persist the result."""
-    changed = False
+    """Backfill any null channel_id from its handle and persist the result.
+
+    Resolution is network-bound and takes seconds per channel, during which `/subscribe`
+    can append to the same file. Writing `channels` back as-is would drop that append, so
+    the file is re-read immediately before saving and only the newly resolved ids are
+    applied on top of it — the caller's list still gets the ids either way."""
+    resolved: dict[str, str] = {}
     for ch in channels:
         if ch.channel_id:
             continue
         cid = resolve_channel_id(ch.handle, proxy)
         if cid:
             ch.channel_id = cid
-            changed = True
+            resolved[ch.handle.lower()] = cid
             logger.info("Resolved %s -> %s", ch.handle, cid)
-    if changed:
-        _save_channels(path, channels)
+    if not resolved:
+        return
+    latest = load_channels(path)
+    for ch in latest:
+        if not ch.channel_id:
+            ch.channel_id = resolved.get(ch.handle.lower())
+    save_channels(path, latest)
 
 
-def _baseline_seed(channels: list[Channel], state: PollerState, proxy: ProxyConfig | None) -> None:
+def _baseline_seed(
+    channels: list[Channel],
+    state: PollerState,
+    proxy: ProxyConfig | None,
+) -> set[str]:
     """Mark every current feed video of the given channels as seen WITHOUT enqueueing it,
     so the poller only ever processes videos published after a channel starts being
     watched (no back-catalogue storm). Called both on first run (all channels) and
-    whenever a channel is newly added to channels.json (just that channel)."""
+    whenever a channel is newly added to channels.json (just that channel).
+
+    Returns the ids of the channels whose feed was actually read. A channel whose fetch
+    failed is deliberately left out: marking it seeded anyway would make the next tick
+    treat its whole back catalogue as new — the exact flood this seeding prevents — and
+    YouTube blocking a datacenter IP makes that failure routine, not exceptional."""
+    seeded: set[str] = set()
     for ch in channels:
         if not ch.channel_id:
             continue
         try:
-            for video in fetch_feed(ch.channel_id, proxy):
-                state.seen.add(video.video_id)
+            videos = fetch_feed(ch.channel_id, proxy)
         except Exception:
             logger.warning("Baseline fetch failed for %s", ch.handle, exc_info=True)
-    logger.info("Baseline-seeded %d existing videos", len(state.seen))
+            continue
+        # An empty feed is a successful read (a channel with no videos yet) — seeded.
+        for video in videos:
+            state.seen.add(video.video_id)
+        seeded.add(ch.channel_id)
+    logger.info("Baseline-seeded %d of %d channels", len(seeded), len(channels))
+    return seeded
+
+
+async def sync_channels(
+    path: Path,
+    state: PollerState,
+    proxy: ProxyConfig | None,
+    current: list[Channel],
+) -> list[Channel]:
+    """Load the watch list, backfill any missing `channel_id`, and baseline-seed channels
+    that have never been seeded. This is the poller's startup sequence, re-run at the top
+    of every tick so a channel added by `/subscribe` starts being watched without a
+    restart — and so it goes through the same baseline seeding as any other new channel,
+    rather than flooding the queue with its back catalogue.
+
+    An unreadable watch list (missing file, corrupt JSON) keeps `current` instead of
+    clearing it: losing the file is a reason to keep watching what we already loaded, not
+    to silently stop watching everything. A file that legitimately parses to an empty
+    list *does* clear the watch list — that's an edit, not a failure."""
+    if not path.exists():
+        if current:
+            logger.warning("Channels file %s disappeared; keeping the loaded channels", path)
+        return current
+    try:
+        channels = load_channels(path)
+    except PersistenceError:
+        logger.exception("Could not reload %s; keeping the loaded channels", path)
+        return current
+
+    await asyncio.to_thread(_resolve_missing_ids, channels, path, proxy)
+
+    # Drop seeded-markers for channels no longer watched. Removing a channel by hand and
+    # re-adding it later is the documented flow (there is no /unsubscribe), and a stale
+    # marker would skip seeding on the way back in — uploading the whole gap period.
+    watched = {ch.channel_id for ch in channels if ch.channel_id}
+    pruned = state.baseline_seeded - watched
+    if pruned:
+        logger.info("Dropping baseline markers for %d unwatched channels", len(pruned))
+        state.baseline_seeded &= watched
+
+    unseeded = [
+        ch for ch in channels if ch.channel_id and ch.channel_id not in state.baseline_seeded
+    ]
+    if unseeded:
+        state.baseline_seeded |= await asyncio.to_thread(_baseline_seed, unseeded, state, proxy)
+    # A prune alone changes state without producing anything to seed — still persist it.
+    if unseeded or pruned:
+        state.save()
+    return channels
 
 
 def _resolve_project(client: ClaudeClient, name_or_uuid: str) -> str | None:
@@ -403,9 +475,24 @@ class TranscriptPoller:
                 return replace(video, upload_attempts=attempts)
 
     async def _tick(self) -> None:
-        # 1. Detect new videos across all channels.
+        # 0. Re-read the watch list so channels added since the last tick (via
+        # /subscribe, or by editing channels.json directly) are picked up — seeded
+        # first, so this tick treats their back catalogue as already seen.
+        self._channels = await sync_channels(
+            self._config.poller.channels_path,
+            self._state,
+            self._config.transcript.proxy,
+            self._channels,
+        )
+
+        # 1. Detect new videos across all channels. A channel whose baseline seed failed
+        # above is skipped: its feed has never been read, so every entry would look new
+        # and its back catalogue would be enqueued wholesale. Seeding is retried next tick.
         for ch in self._channels:
             if not ch.channel_id:
+                continue
+            if ch.channel_id not in self._state.baseline_seeded:
+                logger.info("Skipping %s until its baseline seed succeeds", ch.handle)
                 continue
             try:
                 videos = await asyncio.to_thread(
@@ -438,7 +525,9 @@ class TranscriptPoller:
             for ch in self._channels
             if ch.channel_id
         }
-        project_names = set(channel_project_name.values())
+        # The global default is always resolved, even when every channel overrides it —
+        # it's the fallback for a pending video whose channel is no longer configured.
+        project_names = set(channel_project_name.values()) | {self._project_name}
         try:
             project_ids = await self._resolve_project_ids(project_names)
         except AuthError:
@@ -472,7 +561,10 @@ class TranscriptPoller:
             if now - datetime.fromisoformat(video.published) < UPLOAD_DELAY:
                 settled.append(video)
                 continue
-            project_name = channel_project_name[video.channel_id]
+            # A pending video whose channel has since been removed from channels.json
+            # still gets uploaded, to the global default project — it was already
+            # detected and paid for, and dropping it here would be a silent data loss.
+            project_name = channel_project_name.get(video.channel_id, self._project_name)
             project_id = project_ids.get(project_name)
             if project_id is None:
                 # Misconfigured project name (typo, wrong org) — leave it pending,
@@ -530,28 +622,27 @@ async def run_poller(app: Application, config: Config) -> None:
     client: ClaudeClient = app.bot_data["claude_client"]
     queue: Queue = app.bot_data["queue"]
 
-    channels = load_channels(config.poller.channels_path)
-    if not channels:
-        logger.warning("No channels configured (%s); poller idle", config.poller.channels_path)
-        return
-
-    await asyncio.to_thread(
-        _resolve_missing_ids,
-        channels,
-        config.poller.channels_path,
-        config.transcript.proxy,
-    )
-
     config.storage.data_dir.mkdir(parents=True, exist_ok=True)
     state_path = config.storage.data_dir / "poller_state.json"
     state = PollerState.load(state_path)
-    unseeded = [
-        ch for ch in channels if ch.channel_id and ch.channel_id not in state.baseline_seeded
-    ]
-    if unseeded:
-        await asyncio.to_thread(_baseline_seed, unseeded, state, config.transcript.proxy)
-        state.baseline_seeded.update(cast(str, ch.channel_id) for ch in unseeded)
-        state.save()
+
+    # Startup stays fail-closed on a corrupt watch list — that's a configuration error,
+    # and starting up watching nothing would hide it. Only the per-tick reload degrades
+    # gracefully (sync_channels keeps the channels it already had).
+    channels = load_channels(config.poller.channels_path)
+    channels = await sync_channels(
+        config.poller.channels_path,
+        state,
+        config.transcript.proxy,
+        channels,
+    )
+    if not channels:
+        # Not fatal any more: every tick re-reads the file, so a watch list that is
+        # empty (or missing) at startup starts working the moment /subscribe writes one.
+        logger.warning(
+            "No channels configured (%s); poller idle until one is added",
+            config.poller.channels_path,
+        )
 
     poller = TranscriptPoller(app, config, client, queue, channels, state, project_name)
     await poller.run()

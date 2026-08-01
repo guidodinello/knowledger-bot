@@ -48,7 +48,10 @@ Send the bot a YouTube URL. It will show your Claude projects as buttons — tap
 | `/start` | Welcome message |
 | `/help` | Show help |
 | `/inqueue` | Show queued/pending uploads |
+| `/subscribed` | List the channels watched for auto-upload |
+| `/subscribe <link>` | Watch a channel — send a link to any of its videos (or its `@handle`), then pick a project |
 | `/refresh` | Reload Claude project list |
+| `/version` | Show the running build (commit SHA and date) |
 
 ## Token management
 
@@ -84,6 +87,7 @@ To find your `PERSONAL_ORG_ID`: while logged into your personal claude.ai accoun
 ## Notes
 
 - The project list is cached at startup; use `/refresh` to pick up new projects without restarting.
+- The auto-upload watch list (`channels.json`, or `CHANNELS_PATH`) is re-read on every poll, so `/subscribe` — or an edit by hand — takes effect within one `POLL_INTERVAL_SECONDS` without a restart. A newly watched channel is baseline-seeded: its existing videos are marked as seen, so only what it posts from then on gets uploaded.
 - Videos without captions will report "no transcript available". A blocked/temporarily-failed transcript request is reported separately and retried — it is never treated as "no captions available".
 - Failed uploads (e.g. due to an expired token) are queued and retried automatically after a successful token update.
 

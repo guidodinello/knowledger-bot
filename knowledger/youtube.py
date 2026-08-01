@@ -47,12 +47,19 @@ class VideoMetadata:
     title: str
     channel_name: str
     upload_date: str | None
+    # oEmbed's `author_url` — the channel the video belongs to (e.g.
+    # "https://www.youtube.com/@Foo"). Optional because nothing in the upload path needs
+    # it; /subscribe uses it to derive the channel to watch from a single video link.
+    channel_url: str | None = None
+
+
+_YOUTUBE_HOSTS = ("www.youtube.com", "youtube.com", "m.youtube.com")
 
 
 def extract_video_id(url: str) -> str | None:
     parsed = urlparse(url)
 
-    if parsed.hostname in ("www.youtube.com", "youtube.com"):
+    if parsed.hostname in _YOUTUBE_HOSTS:
         if parsed.path == "/watch":
             qs = parse_qs(parsed.query)
             ids = qs.get("v")
@@ -64,6 +71,31 @@ def extract_video_id(url: str) -> str | None:
         vid = parsed.path.lstrip("/").split("/")[0]
         return vid or None
 
+    return None
+
+
+def extract_channel_handle(url: str) -> str | None:
+    """Return the channel-identifying path segment of a YouTube channel URL, in the form
+    `resolve_channel_id` expects to append to `https://www.youtube.com/`: `"@handle"`,
+    or the legacy/id forms `"channel/UC..."`, `"c/Name"`, `"user/Name"`.
+
+    A bare `"@handle"` (no URL around it) is accepted too — that's what a user is most
+    likely to type. Returns None for anything that isn't a channel reference, including
+    video URLs (use `extract_video_id` for those)."""
+    text = url.strip()
+    if text.startswith("@"):
+        return text if "/" not in text else None
+
+    parsed = urlparse(text if "//" in text else f"https://{text}")
+    if parsed.hostname not in _YOUTUBE_HOSTS:
+        return None
+    parts = [p for p in parsed.path.split("/") if p]
+    if not parts:
+        return None
+    if parts[0].startswith("@"):
+        return parts[0]
+    if len(parts) >= 2 and parts[0] in ("channel", "c", "user"):
+        return f"{parts[0]}/{parts[1]}"
     return None
 
 
@@ -114,6 +146,7 @@ def fetch_video_metadata(url: str, proxy: ProxyConfig | None = None) -> VideoMet
         title=title,
         channel_name=data["author_name"],
         upload_date=upload_date,
+        channel_url=data.get("author_url"),
     )
 
 
