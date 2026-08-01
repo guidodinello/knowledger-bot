@@ -3,8 +3,13 @@ name: CI
 on:
   push:
     branches: [main]
+  # Deliberately unfiltered by base branch. Restricting this to `branches: [main]`
+  # silently skips CI on any PR targeting something else — a stacked PR based on
+  # another feature branch gets zero verification, then inherits a green tick when
+  # GitHub retargets it to main on the parent's merge. Every PR should be checked
+  # regardless of where it is aimed; `push` stays scoped to main so branch pushes
+  # do not duplicate each PR run.
   pull_request:
-    branches: [main]
   workflow_dispatch:
 
 jobs:
