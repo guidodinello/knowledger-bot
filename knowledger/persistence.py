@@ -6,7 +6,6 @@ propagate. The alternative (silently treating a corrupt file as empty) risks a
 subsequent write permanently discarding data that was only temporarily unreadable.
 """
 
-import ctypes
 import json
 import os
 from contextlib import suppress
@@ -73,46 +72,27 @@ def atomic_write_json(path: Path, data: Any, *, mode: int | None = None) -> None
         raise PersistenceIOError(path, f"could not be written: {e}") from e
 
 
-_AT_FDCWD = -100
-_RENAME_EXCHANGE = 2
-
-
-def _exchange_paths(source: Path, destination: Path) -> None:
-    """Atomically swap two existing paths using Linux renameat2."""
-    renameat2 = ctypes.CDLL(None, use_errno=True).renameat2
-    result = renameat2(
-        _AT_FDCWD,
-        os.fsencode(source),
-        _AT_FDCWD,
-        os.fsencode(destination),
-        _RENAME_EXCHANGE,
-    )
-    if result != 0:
-        error = ctypes.get_errno()
-        raise OSError(error, os.strerror(error), destination)
-
-
 def atomic_write_json_if_exists(path: Path, data: Any) -> bool:
-    """Atomically replace an existing JSON file without ever recreating a missing one.
+    """Atomically replace an existing JSON file, declining to create a missing one.
+    Returns whether the replacement occurred.
 
-    The rename-exchange operation requires both paths to exist at the instant of the
-    swap. If `path` was concurrently deleted, it fails with FileNotFoundError and the
-    deletion wins; otherwise the new JSON lands atomically and the old file is removed
-    from the temporary path. Returns whether the replacement occurred.
+    The existence check is not atomic with the replacement: a deletion landing in the
+    microseconds between them loses, and the file is recreated. That race is tolerated
+    deliberately. Closing it requires renameat2(RENAME_EXCHANGE), which the stdlib does
+    not expose (there is no os.renameat2 and no os.RENAME_* constants), so it can only be
+    reached by issuing a raw syscall with a hand-maintained per-architecture number —
+    machinery that is invisible to tests on a glibc host and broke outright on the
+    musl-based production image. The only writers here are the poller and /subscribe,
+    already serialized by a lock in poller.channels_file_lock; the sole racer left is a
+    concurrent manual `rm`, whose worst outcome is a deleted file coming back with the
+    contents read an instant earlier.
     """
+    if not path.exists():
+        return False
     tmp = path.with_suffix(".tmp")
     try:
         tmp.write_text(json.dumps(data, indent=2), encoding="utf-8")
-        try:
-            _exchange_paths(tmp, path)
-        except FileNotFoundError:
-            with suppress(OSError):
-                tmp.unlink()
-            return False
-        # After the exchange, tmp names the old destination. Its cleanup is best-effort:
-        # the requested data is already safely installed at path.
-        with suppress(OSError):
-            tmp.unlink()
+        os.replace(tmp, path)
         return True
     except OSError as e:
         with suppress(OSError):
