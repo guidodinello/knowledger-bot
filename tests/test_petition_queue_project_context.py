@@ -312,7 +312,6 @@ def test_handle_youtube_url_fails_closed_on_corrupt_persisted_cache(
     assert "/refresh" in message.replies[-1]
 
 
-
 def test_upload_more_reports_a_project_list_network_failure(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,

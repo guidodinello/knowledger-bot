@@ -70,6 +70,8 @@ def _fmt_days(delta: timedelta) -> str:
         hours = round(delta.total_seconds() / 3600)
         return f"{hours} hours"
     return "a day" if days == 1 else f"{days} days"
+
+
 # Priority order: a channel page carries its OWN id as "externalId" / the canonical
 # /channel/ link, but also embeds OTHER channels' "channelId" (recommendations, etc.) —
 # so match the authoritative fields first and fall back to a bare channelId only last.
@@ -460,8 +462,7 @@ class TranscriptPoller:
                 await notify(
                     self._app,
                     self._config,
-                    _video_subject(video)
-                    + "\n\nStill no captions after "
+                    _video_subject(video) + "\n\nStill no captions after "
                     f"{_fmt_days(GIVE_UP_AFTER)}, so I've stopped waiting for them.",
                 )
                 return None
