@@ -32,6 +32,11 @@ class UploadRecord:
     video_title: str
     channel_name: str
     uploaded_at: str  # ISO-8601 UTC
+    # Lets the weekly recap link each title back to the video. Defaulted rather than
+    # required, and deliberately without a HISTORY_SCHEMA_VERSION bump: load_history
+    # does UploadRecord(**item), so records written before this field existed keep
+    # loading and simply render as plain text.
+    video_id: str | None = None
 
 
 def record_upload(data_dir: Path, record: UploadRecord) -> None:

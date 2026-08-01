@@ -49,7 +49,25 @@ class FakeMessage:
         self.message_id = message_id
         self.replies: list[str] = []
 
-    async def reply_text(self, text: str, parse_mode: str | None = None, reply_markup=None) -> None:
+    async def reply_text(
+        self,
+        text: str,
+        parse_mode: str | None = None,
+        reply_markup=None,
+        **kwargs,
+    ) -> "FakeMessage":
+        self.replies.append(text)
+        # Handlers send one status message and edit it in place, so this must return
+        # something editable; edits land in the same list, in the order the user saw them.
+        return self
+
+    async def edit_text(
+        self,
+        text: str,
+        parse_mode: str | None = None,
+        reply_markup=None,
+        **kwargs,
+    ) -> None:
         self.replies.append(text)
 
 
@@ -66,6 +84,7 @@ class FakeQuery:
         text: str,
         parse_mode: str | None = None,
         reply_markup=None,
+        **kwargs,
     ) -> None:
         self.edits.append(text)
 
@@ -227,8 +246,13 @@ def test_handle_youtube_url_falls_back_to_persisted_projects_on_auth_error(
 
     asyncio.run(handle_youtube_url(cast(Update, update), cast(CustomContext, context)))
 
-    assert any("Using last known project list" in r for r in message.replies)
-    assert any("Select a project" in r for r in message.replies)
+    # Assert on the message's FINAL state, not on everything ever written to it. The
+    # handler edits one message in place, so a warning sent as its own edit would be
+    # overwritten by the picker — invisible to the user, but still present in
+    # `replies`, which is why this has to check the last entry specifically.
+    final = message.replies[-1]
+    assert "last project list I saw" in final
+    assert "Which project?" in final
     assert context.user_data["video_1"].video_id == "v1"
 
 
@@ -253,7 +277,7 @@ def test_handle_youtube_url_dead_ends_without_any_persisted_projects(
 
     asyncio.run(handle_youtube_url(cast(Update, update), cast(CustomContext, context)))
 
-    assert message.replies[-1].startswith("Auth error:")
+    assert "session token has expired" in message.replies[-1]
     assert "video_1" not in context.user_data
 
 
@@ -279,8 +303,10 @@ def test_handle_youtube_url_fails_closed_on_corrupt_persisted_cache(
 
     asyncio.run(handle_youtube_url(cast(Update, update), cast(CustomContext, context)))
 
-    assert message.replies[-1].startswith("Auth error:")
-    assert "cached project list" in message.replies[-1]
+    # Fails closed with the actionable recovery step rather than dead-ending. The
+    # corrupt-cache detail stays in the logs — it isn't something the user can act on.
+    assert "session token has expired" in message.replies[-1]
+    assert "/refresh" in message.replies[-1]
 
 
 # --- handle_project_selection: dedup-check AuthError falls through ----------------
@@ -317,7 +343,7 @@ def test_dedup_check_auth_error_falls_through_to_queue(
 
     asyncio.run(handle_project_selection(cast(Update, update), cast(CustomContext, context)))
 
-    assert "expired" in query.edits[-1].lower()
+    assert "waiting on a valid token" in query.edits[-1].lower()
     entries = queue.peek()
     assert len(entries) == 1
     assert entries[0].project_id == "p1"
@@ -360,7 +386,7 @@ def test_dedup_check_still_finds_duplicates_when_token_is_healthy(
 
     asyncio.run(handle_project_selection(cast(Update, update), cast(CustomContext, context)))
 
-    assert "skip or overwrite" in query.edits[-1].lower()
+    assert "overwrite it with a fresh transcript, or skip?" in query.edits[-1].lower()
     assert queue.peek() == []
 
 

@@ -23,7 +23,7 @@ class FakeBot:
     def __init__(self) -> None:
         self.sent: list[tuple[int, str]] = []
 
-    async def send_message(self, chat_id, text, parse_mode=None) -> None:
+    async def send_message(self, chat_id, text, parse_mode=None, **kwargs) -> None:
         self.sent.append((chat_id, text))
 
 
@@ -115,7 +115,12 @@ def test_success_notifies_and_drops_entry(tmp_path: Path) -> None:
 
     assert result.uploaded == 1
     assert queue.peek() == []
-    assert app.bot.sent == [(1, "Queued upload saved: *f1*")]
+    chat_id, text = app.bot.sent[0]
+    assert chat_id == 1
+    assert "Saved" in text
+    # The confirmation names the video, not the derived doc file name.
+    assert "Title" in text
+    assert "f1" not in text
 
 
 def test_auth_error_releases_silently_then_succeeds(tmp_path: Path) -> None:
@@ -146,10 +151,30 @@ def test_alert_fires_once_at_threshold_then_recovers(tmp_path: Path) -> None:
     for _ in range(MAX_UPLOAD_ATTEMPTS):
         asyncio.run(_drain(app, config, client, queue))
     assert len(app.bot.sent) == 1
-    assert "stuck" in app.bot.sent[0][1]
+    assert f"Stuck after {MAX_UPLOAD_ATTEMPTS} attempts" in app.bot.sent[0][1]
 
     result = asyncio.run(_drain(app, config, client, queue))
     assert result.uploaded == 1
+
+
+def test_stuck_alert_survives_a_video_title_containing_braces(tmp_path: Path) -> None:
+    """The alert used to be built as a template string with a literal `{attempts}`
+    placeholder that `_release_with_alert` then `.format()`ed. Because the video title
+    was interpolated into that template first, any title containing a brace raised
+    KeyError/IndexError inside format() — losing the very alert meant to surface a
+    permanently stuck entry."""
+    queue = Queue(path=tmp_path / "q.json")
+    queue.enqueue(_entry("v4", "f4", video_title="Ranking every {city} in 2026 {}"))
+    client = FakeClaudeClient()
+    client.fail_upload_times = MAX_UPLOAD_ATTEMPTS
+    app = FakeTelegramApp()
+    config = _config(tmp_path)
+
+    for _ in range(MAX_UPLOAD_ATTEMPTS):
+        asyncio.run(_drain(app, config, client, queue))
+
+    assert len(app.bot.sent) == 1
+    assert "Ranking every {city} in 2026 {}" in app.bot.sent[0][1]
 
 
 def test_overwrite_deletes_old_doc_then_uploads(tmp_path: Path) -> None:

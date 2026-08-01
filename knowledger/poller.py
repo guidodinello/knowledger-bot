@@ -27,6 +27,7 @@ from .notify import notify
 from .persistence import CorruptDataError, PersistenceError, atomic_write_json, load_json
 from .queue import Queue, build_auth_fallback_entry
 from .queue_processor import MAX_UPLOAD_ATTEMPTS
+from .telegram_format import bold, code, subject
 from .transcript import TranscriptTransportError, TranscriptUnavailable, fetch_transcript
 from .upload_service import (
     AlreadyExists,
@@ -45,6 +46,21 @@ YT_NS = "{http://www.youtube.com/xml/schemas/2015}"
 
 UPLOAD_DELAY = timedelta(hours=24)  # wait for YouTube's polished captions to replace the draft
 GIVE_UP_AFTER = timedelta(hours=72)  # measured from first detection, not publish time
+
+
+def _video_subject(video: "PendingVideo") -> str:
+    """Every notification about a pending video names it the same way."""
+    return subject(video.title, video.channel_name, video.video_id)
+
+
+def _fmt_days(delta: timedelta) -> str:
+    """Render a give-up/delay window for user-facing copy. Derived from the constant
+    rather than restated as a literal, so the copy can't drift when it changes."""
+    days = round(delta.total_seconds() / 86400)
+    if days < 1:
+        hours = round(delta.total_seconds() / 3600)
+        return f"{hours} hours"
+    return "a day" if days == 1 else f"{days} days"
 # Priority order: a channel page carries its OWN id as "externalId" / the canonical
 # /channel/ link, but also embeds OTHER channels' "channelId" (recommendations, etc.) —
 # so match the authoritative fields first and fall back to a bare channelId only last.
@@ -382,6 +398,7 @@ class TranscriptPoller:
     async def _process_video(
         self,
         project_id: str,
+        project_name: str,
         video: PendingVideo,
         now: datetime,
     ) -> PendingVideo | None:
@@ -406,7 +423,9 @@ class TranscriptPoller:
                 await notify(
                     self._app,
                     self._config,
-                    f"⚠️ No captions for “{video.title}” — gave up.",
+                    _video_subject(video)
+                    + "\n\nStill no captions after "
+                    f"{_fmt_days(GIVE_UP_AFTER)}, so I've stopped waiting for them.",
                 )
                 return None
             logger.info("Transcript not ready for %s; will retry", video.video_id)
@@ -430,9 +449,14 @@ class TranscriptPoller:
                         video_title=video.title,
                         channel_name=video.channel_name,
                         uploaded_at=datetime.now(UTC).isoformat(),
+                        video_id=video.video_id,
                     ),
                 )
-                await notify(self._app, self._config, f"✅ Auto-uploaded “{file_name}”")
+                await notify(
+                    self._app,
+                    self._config,
+                    f"✅ Auto-saved to {bold(project_name)}\n{_video_subject(video)}",
+                )
                 return None
             case AlreadyExists():
                 logger.info("Doc already exists, skipping: %s", file_name)
@@ -450,7 +474,9 @@ class TranscriptPoller:
                 await notify(
                     self._app,
                     self._config,
-                    f"Token expired — “{file_name}” queued. Run /refresh.",
+                    f"⏳ Waiting on a valid token\n{_video_subject(video)}\n\n"
+                    "The transcript is queued. Update your Claude session token, "
+                    "then run /refresh.",
                 )
                 return video  # keep pending until we confirm the upload landed
             case RetryPending(step=step, error=error):
@@ -469,8 +495,10 @@ class TranscriptPoller:
                     await notify(
                         self._app,
                         self._config,
-                        f"🛑 Upload stuck for “{file_name}” while {step} — failed {attempts}x in "
-                        "a row. Check logs; it will keep retrying.",
+                        f"🛑 Stuck after {attempts} attempts — the upload to "
+                        f"{bold(project_name)} keeps failing.\n{_video_subject(video)}\n\n"
+                        "It stays queued and keeps retrying; check the logs if it "
+                        "doesn't clear.",
                     )
                 return replace(video, upload_attempts=attempts)
 
@@ -537,8 +565,10 @@ class TranscriptPoller:
                 await notify(
                     self._app,
                     self._config,
-                    "⚠️ Claude session token expired — poller is paused. "
-                    "Update the token (`POST /update-token`) to resume.",
+                    "⚠️ Auto-upload is paused: your Claude session token has expired.\n\n"
+                    f"Send a new one to {code('POST /update-token')} and I'll resume "
+                    "on the next check. Nothing is lost in the meantime — new videos "
+                    "stay queued (see /inqueue).",
                 )
             return
         if self._state.auth_error_notified:
@@ -546,7 +576,7 @@ class TranscriptPoller:
             await notify(
                 self._app,
                 self._config,
-                "✅ Claude session token restored — poller resumed.",
+                "✅ Token accepted — auto-upload has resumed.",
             )
 
         # 3. Process every pending video whose publish time is at least UPLOAD_DELAY
@@ -571,7 +601,7 @@ class TranscriptPoller:
                 # don't drop it; _resolve_project already logged the error.
                 settled.append(video)
                 continue
-            result = await self._process_video(project_id, video, now)
+            result = await self._process_video(project_id, project_name, video, now)
             if result is not None:
                 settled.append(result)
             self._state.pending = settled + original_pending[i + 1 :]

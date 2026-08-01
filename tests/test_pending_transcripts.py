@@ -31,7 +31,7 @@ class FakeBot:
     def __init__(self) -> None:
         self.sent: list[tuple[int, str]] = []
 
-    async def send_message(self, chat_id, text, parse_mode=None) -> None:
+    async def send_message(self, chat_id, text, parse_mode=None, **kwargs) -> None:
         self.sent.append((chat_id, text))
 
 
@@ -227,7 +227,7 @@ def test_still_unavailable_gives_up_and_notifies(tmp_path: Path) -> None:
 
     assert store.load() == []
     assert len(app.bot.sent) == 1
-    assert "No captions" in app.bot.sent[0][1]
+    assert "no captions" in app.bot.sent[0][1]
 
 
 def test_successful_retry_uploads_and_notifies_and_drops_entry(tmp_path: Path) -> None:
@@ -243,7 +243,7 @@ def test_successful_retry_uploads_and_notifies_and_drops_entry(tmp_path: Path) -
     assert store.load() == []
     assert client.docs["p"] == [{"uuid": "u1", "file_name": "f1"}]
     assert len(app.bot.sent) == 1
-    assert "f1" in app.bot.sent[0][1]
+    assert "Title" in app.bot.sent[0][1]
 
     # A transcript that was transiently blocked and later retried successfully must
     # still show up in the weekly recap history — this is a real upload, just a
@@ -289,7 +289,7 @@ def test_deferred_for_auth_moves_entry_into_petition_queue(tmp_path: Path) -> No
     assert queued[0].transcript == "transcript text"
     assert queued[0].overwrite_doc_uuid == "old-uuid"
     assert len(app.bot.sent) == 1
-    assert "Token expired" in app.bot.sent[0][1]
+    assert "Waiting on a valid token" in app.bot.sent[0][1]
 
 
 def test_transient_upload_failure_stays_pending(tmp_path: Path) -> None:
@@ -334,7 +334,7 @@ def test_auth_error_listing_docs_moves_entry_into_petition_queue(tmp_path: Path)
     queued = queue.peek()
     assert len(queued) == 1
     assert queued[0].transcript == "transcript text"
-    assert "Token expired" in app.bot.sent[0][1]
+    assert "Waiting on a valid token" in app.bot.sent[0][1]
 
 
 def test_second_auth_failure_for_same_video_reports_already_queued(tmp_path: Path) -> None:
@@ -418,7 +418,7 @@ def test_notify_failure_does_not_abort_remaining_entries_in_batch(tmp_path: Path
     client = FakeClaudeClient()
 
     class FlakyBot(FakeBot):
-        async def send_message(self, chat_id, text, parse_mode=None) -> None:
+        async def send_message(self, chat_id, text, parse_mode=None, **kwargs) -> None:
             if chat_id == 1:
                 raise RuntimeError("bot not initialized yet")
             await super().send_message(chat_id, text, parse_mode=parse_mode)
@@ -430,7 +430,10 @@ def test_notify_failure_does_not_abort_remaining_entries_in_batch(tmp_path: Path
         asyncio.run(_drain(app, _config(tmp_path), client, queue, store))
 
     assert store.load() == []  # both entries resolved despite the first notify failing
-    assert app.bot.sent == [(2, "Transcript request unblocked — saved *f2* to project.")]
+    chat_id, text = app.bot.sent[0]
+    assert chat_id == 2
+    assert "Saved" in text
+    assert "Title" in text
 
 
 if __name__ == "__main__":

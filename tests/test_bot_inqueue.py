@@ -19,7 +19,7 @@ class FakeMessage:
     def __init__(self) -> None:
         self.replies: list[tuple[str, str | None]] = []
 
-    async def reply_text(self, text: str, parse_mode: str | None = None) -> None:
+    async def reply_text(self, text: str, parse_mode: str | None = None, **kwargs) -> None:
         self.replies.append((text, parse_mode))
 
 
@@ -43,11 +43,11 @@ def _config(data_dir: Path) -> Config:
     )
 
 
-def test_inqueue_drops_raw_filenames_no_unescaped_underscore(tmp_path: Path) -> None:
-    """Regression test for docs/bugs/inqueue-markdown-italics.md: the redesign (see
-    docs/features/inqueue-redesign.md) removes the raw on-disk filenames entirely in
-    favor of human section labels, which also eliminates the underscore that used to
-    trigger Telegram's legacy Markdown italics toggle across the whole message."""
+def test_inqueue_with_nothing_queued_says_so_once(tmp_path: Path) -> None:
+    """Three section headers whose only content was the word "empty" told the reader
+    nothing; the single empty state does (UH35). Also still a regression test for
+    docs/bugs/inqueue-markdown-italics.md — no raw on-disk filenames leak into the copy.
+    """
     bot_data = {
         "queue": Queue(path=tmp_path / "petition_queue.json"),
         "config": _config(tmp_path),
@@ -61,14 +61,11 @@ def test_inqueue_drops_raw_filenames_no_unescaped_underscore(tmp_path: Path) -> 
 
     assert len(message.replies) == 1
     text, parse_mode = message.replies[0]
-    assert parse_mode == "Markdown"
+    assert parse_mode == "HTML"
     assert "petition_queue.json" not in text
     assert "poller_state.json" not in text
     assert "pending_transcripts.json" not in text
-    assert "_" not in text
-    assert "🔁 Retry queue: empty" in text
-    assert "⏳ Poller: empty" in text
-    assert "📥 Blocked transcripts: empty" in text
+    assert text == "✅ Nothing queued — everything's up to date."
 
 
 def test_inqueue_shows_counts_stuck_marker_and_caps_long_lists(tmp_path: Path) -> None:
@@ -116,10 +113,13 @@ def test_inqueue_shows_counts_stuck_marker_and_caps_long_lists(tmp_path: Path) -
     asyncio.run(cmd_inqueue(update, context))  # type: ignore[arg-type]
 
     text, _ = message.replies[0]
-    assert "🔁 Retry queue — 2 queued" in text
-    assert "⚠️" in text
+    assert "Retry queue — 2 queued" in text
+    assert "🛑" in text  # stuck marker; same emoji as the stuck alert
     assert "4 failed attempts" in text
     assert "run /refresh to retry" in text
-    assert "⏳ Poller — 12 pending" in text
+    assert "Poller — 12 waiting to upload" in text
     assert "+2 more" in text
-    assert "12 videos seen total" in text
+    assert "12 videos seen since the poller started." in text
+    # Titles link back to the video rather than sitting there as dead text.
+    assert '<a href="https://youtu.be/v0">Title 0</a>' in text
+    assert '<a href="https://youtu.be/pv0">Video 0</a>' in text

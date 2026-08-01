@@ -48,7 +48,7 @@ def test_next_occurrence_non_matching_weekday() -> None:
 
 
 def test_format_recap_empty_week() -> None:
-    assert _format_recap([], {}) == "No transcripts uploaded this week."
+    assert _format_recap([], {}) == "Nothing was uploaded this week."
 
 
 def test_format_recap_groups_by_project_sorted_by_count() -> None:
@@ -59,14 +59,14 @@ def test_format_recap_groups_by_project_sorted_by_count() -> None:
     ]
     text = _format_recap(records, {"p1": "Investments", "p2": "Exercise"})
     assert text.index("Exercise (2)") < text.index("Investments (1)")
-    assert "“T2” — C2" in text
+    assert "• T2 — C2" in text
     assert "3 transcripts uploaded this week." in text
 
 
 def test_format_recap_omits_channel_suffix_when_blank() -> None:
     records = [UploadRecord("p1", "f1", "T1", "", "2026-07-17T18:00:00+00:00")]
     text = _format_recap(records, {"p1": "Investments"})
-    assert "“T1”" in text
+    assert "• T1" in text
     assert "—" not in text.split("\n", 1)[1]  # no channel suffix on the item line
 
 
@@ -74,7 +74,7 @@ class FakeBot:
     def __init__(self) -> None:
         self.sent: list[tuple[int, str]] = []
 
-    async def send_message(self, chat_id, text, parse_mode=None) -> None:
+    async def send_message(self, chat_id, text, parse_mode=None, **kwargs) -> None:
         self.sent.append((chat_id, text))
 
 
@@ -124,8 +124,8 @@ def test_send_recap_groups_and_falls_back_to_raw_id_for_deleted_project(
     text = app.bot.sent[0][1]
     assert "Investments (2)" in text
     assert "gone (1)" in text  # deleted project: raw id shown, not an error
-    assert "“T1”" in text
-    assert "“T3” — C2" in text
+    assert "• T1" in text
+    assert "• T3 — C2" in text
     assert "3 transcripts uploaded this week." in text
 
 
@@ -142,9 +142,9 @@ def test_send_recap_filters_to_the_last_7_days(tmp_path: Path) -> None:
     asyncio.run(_send_recap(cast(Application, app), config, cast(ClaudeClient, client)))
 
     text = app.bot.sent[0][1]
-    assert "“New”" in text
-    assert "“Old”" not in text
-    assert "1 transcripts uploaded this week." in text
+    assert "• New" in text
+    assert "Old" not in text
+    assert "1 transcript uploaded this week." in text
 
 
 def test_send_recap_empty_history_sends_no_uploads_message(tmp_path: Path) -> None:
@@ -154,7 +154,7 @@ def test_send_recap_empty_history_sends_no_uploads_message(tmp_path: Path) -> No
 
     asyncio.run(_send_recap(cast(Application, app), config, cast(ClaudeClient, client)))
 
-    assert "No transcripts uploaded this week." in app.bot.sent[0][1]
+    assert "Nothing was uploaded this week." in app.bot.sent[0][1]
 
 
 if __name__ == "__main__":

@@ -1,5 +1,12 @@
 # Bug: `/inqueue` Filenames Break Markdown Rendering
 
+**Status:** Resolved — but **not** by the backtick fix prescribed below, which is now
+wrong. Every message moved off legacy Markdown onto HTML behind
+`knowledger/telegram_format.py`; escaping is a single `esc()` transform there rather
+than a per-interpolation obligation, so this whole bug class (this doc and
+[unescaped-markdown-injection.md](unescaped-markdown-injection.md)) can no longer
+recur. `/inqueue` also no longer prints the raw on-disk filenames at all.
+
 **Severity:** Low
 **File:** `knowledger/bot.py:195-239` (`cmd_inqueue`)
 
