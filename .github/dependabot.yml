@@ -1,0 +1,29 @@
+version: 2
+updates:
+  # uv-managed Python dependencies. Dependabot reads pyproject.toml/uv.lock via
+  # the pip ecosystem; grouping keeps one PR per week instead of one per package.
+  - package-ecosystem: pip
+    directory: /
+    schedule:
+      interval: weekly
+    groups:
+      python-dependencies:
+        patterns:
+          - "*"
+
+  - package-ecosystem: github-actions
+    directory: /
+    schedule:
+      interval: weekly
+    groups:
+      github-actions:
+        patterns:
+          - "*"
+
+  # Tracks the `FROM python:...` base image. The uv binary arrives via
+  # `COPY --from=ghcr.io/astral-sh/uv`, which Dependabot does not track — that
+  # tag is still pinned by hand.
+  - package-ecosystem: docker
+    directory: /
+    schedule:
+      interval: weekly

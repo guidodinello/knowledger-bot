@@ -1,10 +1,16 @@
-FROM python:3.14.5-alpine3.22
+# Debian slim, not Alpine, deliberately. On musl there are no manylinux wheels, so every
+# dependency compiled from source — hence the gcc/musl-dev/libffi-dev install this replaces
+# — and, more importantly, musl exports a different set of libc symbols than the glibc the
+# test suite runs on. That divergence shipped a crash loop: code resolving renameat2 via
+# ctypes passed every test and died on startup in production (see #59). Matching the libc
+# CI tests against removes the whole class, and every dependency here has a prebuilt
+# manylinux wheel, so dropping Alpine also drops the compiler from the image.
+# Pinned to the same patch version as .python-version so local, CI, and prod agree.
+FROM python:3.14.5-slim-trixie
 
 WORKDIR /app
 
 COPY --from=ghcr.io/astral-sh/uv:latest /uv /usr/local/bin/uv
-
-RUN apk add --no-cache gcc=14.2.0-r6 musl-dev=1.2.5-r12 libffi-dev=3.4.8-r0
 
 COPY pyproject.toml uv.lock README.md ./
 COPY knowledger/ knowledger/
