@@ -20,7 +20,6 @@ from pathlib import Path
 
 from curl_cffi.requests.exceptions import RequestException
 from telegram.ext import Application
-from telegram.helpers import escape_markdown
 
 from .claude_client import AuthError, ClaudeClient, Doc
 from .config import Config
@@ -28,6 +27,7 @@ from .history import UploadRecord, record_upload
 from .logger import get_logger
 from .persistence import CorruptDataError, PersistenceError, atomic_write_json, load_json
 from .queue import Queue, QueueEntry, build_auth_fallback_entry
+from .telegram_format import NO_PREVIEW, PARSE_MODE, subject
 from .transcript import TranscriptTransportError, TranscriptUnavailable, fetch_transcript
 from .upload_service import (
     AlreadyExists,
@@ -150,9 +150,24 @@ async def _notify_chat(
     itself failing — the transcript is already safely handled by this point, only
     the user-facing confirmation would be missing."""
     try:
-        await app.bot.send_message(chat_id, text, parse_mode=parse_mode)
+        await app.bot.send_message(
+            chat_id,
+            text,
+            parse_mode=parse_mode,
+            link_preview_options=NO_PREVIEW,
+        )
     except Exception:
         logger.warning("Failed to notify chat %d", chat_id, exc_info=True)
+
+
+def token_expired_message(subject_line: str, *, newly_queued: bool) -> str:
+    """The shared copy for every auth-blocked transcript that made it into Queue."""
+    tail = (
+        "Update your Claude session token, then run /refresh."
+        if newly_queued
+        else "It was already queued — update your token, then run /refresh."
+    )
+    return f"⏳ Waiting on a valid token\n{subject_line}\n\n{tail}"
 
 
 async def _drain_one(
@@ -181,7 +196,10 @@ async def _drain_one(
         await _notify_chat(
             app,
             entry.chat_id,
-            f"⚠️ No captions available for “{entry.video_title}” — gave up.",
+            subject(entry.video_title, entry.channel_name, entry.video_id)
+            + "\n\nThis video has no captions after all, so there's nothing to save. "
+            "I've stopped retrying it.",
+            parse_mode=PARSE_MODE,
         )
         return
 
@@ -198,13 +216,15 @@ async def _drain_one(
         except AuthError:
             store.remove(entry.project_id, entry.video_id)
             added = _enqueue_auth_fallback(queue, entry, transcript)
-            escaped = escape_markdown(entry.file_name, version=1)
-            msg = (
-                f"Token expired — *{escaped}* queued. Run /refresh after updating the token."
-                if added is not None
-                else f"Token expired — *{escaped}* was already queued."
+            await _notify_chat(
+                app,
+                entry.chat_id,
+                token_expired_message(
+                    subject(entry.video_title, entry.channel_name, entry.video_id),
+                    newly_queued=added is not None,
+                ),
+                parse_mode=PARSE_MODE,
             )
-            await _notify_chat(app, entry.chat_id, msg, parse_mode="Markdown")
             return
         except RequestException:
             logger.warning(
@@ -238,14 +258,15 @@ async def _drain_one(
                     video_title=entry.video_title,
                     channel_name=entry.channel_name,
                     uploaded_at=datetime.now(UTC).isoformat(),
+                    video_id=entry.video_id,
                 ),
             )
-            escaped = escape_markdown(entry.file_name, version=1)
             await _notify_chat(
                 app,
                 entry.chat_id,
-                f"Transcript request unblocked — saved *{escaped}* to project.",
-                parse_mode="Markdown",
+                "✅ Saved — YouTube stopped blocking the transcript\n"
+                + subject(entry.video_title, entry.channel_name, entry.video_id),
+                parse_mode=PARSE_MODE,
             )
         case AlreadyExists():
             logger.info("Doc already exists, dropping pending transcript: %s", entry.file_name)
@@ -253,13 +274,15 @@ async def _drain_one(
         case DeferredForAuth():
             store.remove(entry.project_id, entry.video_id)
             added = _enqueue_auth_fallback(queue, entry, transcript)
-            escaped = escape_markdown(entry.file_name, version=1)
-            msg = (
-                f"Token expired — *{escaped}* queued. Run /refresh after updating the token."
-                if added is not None
-                else f"Token expired — *{escaped}* was already queued."
+            await _notify_chat(
+                app,
+                entry.chat_id,
+                token_expired_message(
+                    subject(entry.video_title, entry.channel_name, entry.video_id),
+                    newly_queued=added is not None,
+                ),
+                parse_mode=PARSE_MODE,
             )
-            await _notify_chat(app, entry.chat_id, msg, parse_mode="Markdown")
         case RetryPending(step=step, error=error):
             logger.warning(
                 "Retried upload failed for %s while %s: %s; will retry",

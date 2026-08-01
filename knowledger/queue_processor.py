@@ -10,7 +10,6 @@ from datetime import UTC, datetime
 
 from curl_cffi.requests.exceptions import RequestException
 from telegram.ext import Application
-from telegram.helpers import escape_markdown
 
 from .claude_client import AuthError, ClaudeClient, Doc
 from .config import Config
@@ -18,6 +17,7 @@ from .history import UploadRecord, record_upload
 from .logger import get_logger
 from .notify import notify
 from .queue import Queue, QueueEntry
+from .telegram_format import NO_PREVIEW, PARSE_MODE, cap_message, subject
 from .upload_service import (
     AlreadyExists,
     DeferredForAuth,
@@ -112,8 +112,7 @@ class QueueProcessor:
                     config,
                     entry,
                     result,
-                    f"🛑 Queued upload stuck for “{entry.file_name}” — failed "
-                    "{attempts}x in a row listing project docs. Check logs.",
+                    "I can't reach Claude to check this project",
                 )
                 return
 
@@ -138,13 +137,15 @@ class QueueProcessor:
                         video_title=entry.video_title,
                         channel_name=entry.channel_name,
                         uploaded_at=datetime.now(UTC).isoformat(),
+                        video_id=entry.video_id,
                     ),
                 )
-                escaped = escape_markdown(entry.file_name, version=1)
                 await telegram_app.bot.send_message(
                     entry.chat_id,
-                    f"Queued upload saved: *{escaped}*",
-                    parse_mode="Markdown",
+                    "✅ Saved, after waiting on your token\n"
+                    + subject(entry.video_title, entry.channel_name, entry.video_id),
+                    parse_mode=PARSE_MODE,
+                    link_preview_options=NO_PREVIEW,
                 )
             case AlreadyExists():
                 logger.info("Queued entry already uploaded, skipping: %s", entry.file_name)
@@ -165,8 +166,7 @@ class QueueProcessor:
                     config,
                     entry,
                     result,
-                    f"🛑 Queued upload stuck for “{entry.file_name}” while {step} — failed "
-                    "{attempts}x in a row. Check logs; it will keep retrying.",
+                    "the upload keeps failing",
                 )
 
     async def _release_with_alert(
@@ -175,12 +175,26 @@ class QueueProcessor:
         config: Config,
         entry: QueueEntry,
         result: DrainResult,
-        message_template: str,
+        reason: str,
     ) -> None:
         """Release with an incremented attempt count, and alert every MAX_UPLOAD_ATTEMPTS
-        attempts so a genuinely broken entry doesn't fail invisibly forever."""
+        attempts so a genuinely broken entry doesn't fail invisibly forever.
+
+        `reason` is a plain-language clause, not a format template: this used to take a
+        pre-interpolated string with a literal `{attempts}` placeholder and `.format()`
+        it here, which raised on any video title containing a brace — silently losing
+        the very alert that was supposed to surface a stuck entry."""
         self._queue.release(entry.id, increment_attempts=True)
         attempts = entry.upload_attempts + 1
         if attempts % MAX_UPLOAD_ATTEMPTS == 0:
-            await notify(telegram_app, config, message_template.format(attempts=attempts))
+            await notify(
+                telegram_app,
+                config,
+                cap_message(
+                    f"🛑 Stuck after {attempts} attempts — {reason}.\n"
+                    + subject(entry.video_title, entry.channel_name, entry.video_id)
+                    + "\n\nIt stays queued and keeps retrying; check the logs if it "
+                    "doesn't clear.",
+                ),
+            )
         result.failed_other += 1

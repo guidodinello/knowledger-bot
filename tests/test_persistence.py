@@ -7,6 +7,7 @@ from knowledger.persistence import (
     CorruptDataError,
     PersistenceIOError,
     atomic_write_json,
+    atomic_write_json_if_exists,
     load_json,
 )
 
@@ -50,6 +51,23 @@ def test_atomic_write_json_round_trips(tmp_path: Path) -> None:
     path = tmp_path / "f.json"
     atomic_write_json(path, {"a": 1})
     assert load_json(path) == {"a": 1}
+    assert not path.with_suffix(".tmp").exists()
+
+
+def test_atomic_write_json_if_exists_replaces_an_existing_file(tmp_path: Path) -> None:
+    path = tmp_path / "f.json"
+    atomic_write_json(path, {"old": True})
+
+    assert atomic_write_json_if_exists(path, {"new": True}) is True
+    assert load_json(path) == {"new": True}
+    assert not path.with_suffix(".tmp").exists()
+
+
+def test_atomic_write_json_if_exists_does_not_create_a_missing_file(tmp_path: Path) -> None:
+    path = tmp_path / "missing.json"
+
+    assert atomic_write_json_if_exists(path, {"new": True}) is False
+    assert not path.exists()
     assert not path.with_suffix(".tmp").exists()
 
 

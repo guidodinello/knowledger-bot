@@ -6,6 +6,7 @@ propagate. The alternative (silently treating a corrupt file as empty) risks a
 subsequent write permanently discarding data that was only temporarily unreadable.
 """
 
+import ctypes
 import json
 import os
 from contextlib import suppress
@@ -66,6 +67,53 @@ def atomic_write_json(path: Path, data: Any, *, mode: int | None = None) -> None
         else:
             tmp.write_text(json.dumps(data, indent=2), encoding="utf-8")
         os.replace(tmp, path)
+    except OSError as e:
+        with suppress(OSError):
+            tmp.unlink()
+        raise PersistenceIOError(path, f"could not be written: {e}") from e
+
+
+_AT_FDCWD = -100
+_RENAME_EXCHANGE = 2
+
+
+def _exchange_paths(source: Path, destination: Path) -> None:
+    """Atomically swap two existing paths using Linux renameat2."""
+    renameat2 = ctypes.CDLL(None, use_errno=True).renameat2
+    result = renameat2(
+        _AT_FDCWD,
+        os.fsencode(source),
+        _AT_FDCWD,
+        os.fsencode(destination),
+        _RENAME_EXCHANGE,
+    )
+    if result != 0:
+        error = ctypes.get_errno()
+        raise OSError(error, os.strerror(error), destination)
+
+
+def atomic_write_json_if_exists(path: Path, data: Any) -> bool:
+    """Atomically replace an existing JSON file without ever recreating a missing one.
+
+    The rename-exchange operation requires both paths to exist at the instant of the
+    swap. If `path` was concurrently deleted, it fails with FileNotFoundError and the
+    deletion wins; otherwise the new JSON lands atomically and the old file is removed
+    from the temporary path. Returns whether the replacement occurred.
+    """
+    tmp = path.with_suffix(".tmp")
+    try:
+        tmp.write_text(json.dumps(data, indent=2), encoding="utf-8")
+        try:
+            _exchange_paths(tmp, path)
+        except FileNotFoundError:
+            with suppress(OSError):
+                tmp.unlink()
+            return False
+        # After the exchange, tmp names the old destination. Its cleanup is best-effort:
+        # the requested data is already safely installed at path.
+        with suppress(OSError):
+            tmp.unlink()
+        return True
     except OSError as e:
         with suppress(OSError):
             tmp.unlink()

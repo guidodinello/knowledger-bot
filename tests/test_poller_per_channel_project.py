@@ -1,7 +1,9 @@
 import asyncio
 import json
+from concurrent.futures import ThreadPoolExecutor
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
+from threading import Event
 from types import SimpleNamespace
 from typing import Any, cast
 from unittest.mock import AsyncMock, patch
@@ -27,11 +29,13 @@ from knowledger.poller import (
     PollerState,
     TranscriptPoller,
     _resolve_missing_ids,
+    _save_existing_channels,
     load_channels,
     run_poller,
     save_channels,
 )
 from knowledger.queue import Queue
+from knowledger.subscriptions import ResolvedChannel, add_subscription
 
 
 class FakeClaudeClient:
@@ -446,6 +450,72 @@ def test_resolve_missing_ids_does_not_clobber_a_concurrent_subscribe(tmp_path: P
 
     final = {c.handle: c.channel_id for c in load_channels(channels_path)}
     assert final == {"@slow": "chan-slow", "@new": "chan-new"}
+
+
+def test_id_backfill_and_subscribe_serialize_their_save_windows(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    channels_path = tmp_path / "channels.json"
+    channels_path.write_text(
+        json.dumps([{"handle": "@slow", "name": "Slow", "channel_id": None}]),
+    )
+    stale = load_channels(channels_path)
+    save_started = Event()
+    allow_save = Event()
+    subscription_finished = Event()
+    real_save = _save_existing_channels
+
+    def paused_save(path: Path, channels: list[Channel]) -> bool:
+        save_started.set()
+        assert allow_save.wait(timeout=2)
+        return real_save(path, channels)
+
+    def subscribe() -> None:
+        add_subscription(
+            channels_path,
+            ResolvedChannel(handle="@new", name="New", channel_id="chan-new"),
+            project=None,
+        )
+        subscription_finished.set()
+
+    monkeypatch.setattr("knowledger.poller.resolve_channel_id", lambda handle, proxy: "chan-slow")
+    monkeypatch.setattr("knowledger.poller._save_existing_channels", paused_save)
+
+    with ThreadPoolExecutor(max_workers=2) as executor:
+        backfill = executor.submit(_resolve_missing_ids, stale, channels_path, None)
+        assert save_started.wait(timeout=2)
+        subscription = executor.submit(subscribe)
+        assert not subscription_finished.wait(timeout=0.05)
+        allow_save.set()
+        backfill.result(timeout=2)
+        subscription.result(timeout=2)
+
+    final = {c.handle: c.channel_id for c in load_channels(channels_path)}
+    assert final == {"@slow": "chan-slow", "@new": "chan-new"}
+
+
+def test_id_backfill_does_not_recreate_a_deleted_channels_file(tmp_path: Path) -> None:
+    channels_path = tmp_path / "channels.json"
+    channels_path.write_text(
+        json.dumps([{"handle": "@slow", "name": "Slow", "channel_id": None}]),
+    )
+    stale = load_channels(channels_path)
+
+    real_save = _save_existing_channels
+
+    def delete_before_atomic_swap(path: Path, channels: list[Channel]) -> bool:
+        path.unlink()
+        return real_save(path, channels)
+
+    with (
+        patch("knowledger.poller.resolve_channel_id", return_value="chan-slow"),
+        patch("knowledger.poller._save_existing_channels", delete_before_atomic_swap),
+    ):
+        _resolve_missing_ids(stale, channels_path, None)
+
+    assert stale[0].channel_id == "chan-slow"
+    assert not channels_path.exists()
 
 
 if __name__ == "__main__":

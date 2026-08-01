@@ -5,7 +5,7 @@ from functools import wraps
 from typing import Any, TypedDict
 
 from curl_cffi.requests.exceptions import RequestException
-from telegram import InlineKeyboardButton, InlineKeyboardMarkup, Update, User
+from telegram import BotCommand, InlineKeyboardButton, InlineKeyboardMarkup, Update, User
 from telegram.ext import (
     Application,
     CallbackContext,
@@ -15,13 +15,16 @@ from telegram.ext import (
     MessageHandler,
     filters,
 )
-from telegram.helpers import escape_markdown
 
 from .claude_client import AuthError, ClaudeClient, Doc, Project
 from .config import Config, load_persisted_projects
 from .history import UploadRecord, record_upload
 from .logger import get_logger
-from .pending_transcripts import PendingTranscript, PendingTranscriptStore
+from .pending_transcripts import (
+    PendingTranscript,
+    PendingTranscriptStore,
+    token_expired_message,
+)
 from .persistence import PersistenceError
 from .poller import UPLOAD_DELAY, PollerState, load_channels
 from .queue import Queue, QueueEntry
@@ -32,6 +35,19 @@ from .subscriptions import (
     add_subscription,
     find_subscription,
     resolve_subscription,
+)
+from .telegram_format import (
+    NO_PREVIEW,
+    PARSE_MODE,
+    bold,
+    cap_entries,
+    cap_message,
+    code,
+    esc,
+    fmt_age,
+    fmt_ts,
+    subject,
+    video_link,
 )
 from .transcript import TranscriptTransportError, TranscriptUnavailable, fetch_transcript
 from .upload_service import (
@@ -59,11 +75,14 @@ class PendingUpload(TypedDict):
     file_name: str
     video_id: str
     channel_name: str
+    video_title: str  # the real title; file_name is the derived doc name, not user-facing
 
 
 CustomContext = CallbackContext[Any, dict, dict, BotData]
 
-YOUTUBE_URL_PATTERN = r"https?://(www\.)?(youtube\.com/watch|youtu\.be/|youtube\.com/shorts/)\S+"
+YOUTUBE_URL_PATTERN = (
+    r"https?://(?:(?:www|m)\.)?(?:youtube\.com/(?:watch|shorts/)|youtu\.be/)\S+"
+)
 
 
 def _keyboard_for(
@@ -104,32 +123,58 @@ def _build_keyboard(
     return InlineKeyboardMarkup(keyboard)
 
 
+# Shared error copy. These conditions surface from several handlers, and the recovery
+# step is identical every time — stating it two different ways would be its own defect.
+# The underlying exception is never shown: every site below already logs it, and a raw
+# curl/HTTP string tells the reader nothing they can act on (UH33).
+_AUTH_EXPIRED = (
+    "Your Claude session token has expired, so I can't reach your projects. "
+    "Update the token, then run /refresh."
+)
+_PROJECTS_UNREACHABLE = "Couldn't reach Claude to load your projects. Try again in a moment."
+# Two variants rather than one shared string: the recovery step differs by flow, and
+# telling someone in the subscribe flow to "send the link again" sends them somewhere
+# that won't finish what they started.
+_STALE_UPLOAD_SESSION = "That button belongs to an older message. Send the link again."
+_STALE_SUBSCRIBE_SESSION = "That button belongs to an older message. Run /subscribe again."
+_STALE_LIST_WARNING = (
+    "⚠️ Your session token has expired, so this is the last project list I saw. "
+    "Projects created since then won't be here."
+)
+
+
 async def _projects_for_picker(
     context: CustomContext,
     reply: Callable[[str], Awaitable[Any]],
-) -> list[Project] | None:
-    """The projects to offer in an inline picker: the live list, or the last known one
-    when the token has gone bad. Returns None — after explaining why through `reply` —
-    when there is nothing to show at all."""
+) -> tuple[list[Project], str | None] | None:
+    """The projects to offer in an inline picker, plus a caveat to show above it (None
+    when the list is fresh). Returns None — after explaining why through `reply` — when
+    there is nothing to show at all.
+
+    The caveat is returned rather than sent here on purpose: callers render the picker
+    by *editing* their status message, so a warning emitted as its own edit would be
+    overwritten by the picker a moment later and the user would never see it."""
     try:
         projects = await asyncio.to_thread(context.bot_data["claude_client"].list_projects)
-    except AuthError as e:
+    except AuthError:
         try:
             projects = load_persisted_projects(context.bot_data["config"].storage.data_dir)
-        except PersistenceError as cache_err:
+        except PersistenceError:
             logger.exception("Failed to load persisted project list")
-            await reply(
-                f"Auth error: {e}\nAlso failed to load the cached project list: {cache_err}",
-            )
+            await reply(_AUTH_EXPIRED)
             return None
         if not projects:
-            await reply(f"Auth error: {e}")
+            await reply(_AUTH_EXPIRED)
             return None
-        await reply("⚠️ Using last known project list — may not include newly created projects.")
-    if not projects:
-        await reply("No projects found. Use /refresh to reload your Claude projects.")
+        return projects, _STALE_LIST_WARNING
+    except RequestException:
+        logger.exception("Failed to load project list for picker")
+        await reply(_PROJECTS_UNREACHABLE)
         return None
-    return projects
+    if not projects:
+        await reply("No projects found. Run /refresh to reload them from Claude.")
+        return None
+    return projects, None
 
 
 def _authenticated_user(update: Update, config: Config) -> User | None:
@@ -165,17 +210,32 @@ def _require_auth(handler: _AuthedHandler) -> _Handler:
     return wrapper
 
 
+# Single source of truth for the command list: both the /help text and Telegram's
+# native command menu are derived from it, so the two can never drift. `usage` is the
+# argument hint shown in /help only — set_my_commands takes the bare name.
+_COMMANDS: list[tuple[str, str, str]] = [
+    ("subscribe", "<link>", "watch a channel for new uploads"),
+    ("subscribed", "", "list watched channels"),
+    ("inqueue", "", "what's waiting to upload"),
+    ("refresh", "", "reload the project list and retry the queue"),
+    ("version", "", "show the running build"),
+    ("help", "", "show this message"),
+]
+
+
+def _help_text() -> str:
+    lines = ["Send me a YouTube URL and I'll save its transcript to a Claude project.", ""]
+    for name, usage, description in _COMMANDS:
+        command = f"/{name} {usage}".rstrip()
+        lines.append(f"{esc(command)} — {esc(description)}")
+    return "\n".join(lines)
+
+
 @_require_auth
 async def cmd_start(update: Update, context: CustomContext, user: User) -> None:
     if update.message is None:
         return
-    await update.message.reply_text(
-        "Send me a YouTube URL and I'll let you pick a Claude project to save the "
-        "transcript to.\n\n"
-        "Commands: /inqueue — show queue contents, /subscribed — list watched channels, "
-        "/subscribe <link> — watch a channel, /refresh — reload project list, "
-        "/version — show running build, /help — show this message",
-    )
+    await update.message.reply_text(_help_text(), parse_mode=PARSE_MODE)
 
 
 @_require_auth
@@ -188,28 +248,43 @@ async def cmd_version(update: Update, context: CustomContext, user: User) -> Non
     if update.message is None:
         return
     version = context.bot_data["config"].version
-    sha = version.commit_sha or "unknown"
-    date = version.commit_date or "unknown"
-    await update.message.reply_text(f"Running {sha}, committed {date}.")
+    if version.commit_sha is None:
+        await update.message.reply_text(
+            "This build wasn't stamped with a commit — it was most likely run from a "
+            "working copy rather than a release image.",
+        )
+        return
+    line = f"Running {code(version.commit_sha)}"
+    if version.commit_date:
+        age = fmt_age(version.commit_date)
+        committed = fmt_ts(version.commit_date)
+        line += f", committed {esc(committed)}"
+        if age:
+            line += f" ({esc(age)})"
+    await update.message.reply_text(line + ".", parse_mode=PARSE_MODE)
 
 
 @_require_auth
 async def cmd_refresh(update: Update, context: CustomContext, user: User) -> None:
     if update.message is None:
         return
-    await update.message.reply_text("Refreshing project list...")
+    # One status message, edited in place as the work progresses, rather than a new
+    # message per stage — otherwise the chat accumulates dead "Refreshing..." lines.
+    status = await update.message.reply_text("Reloading your projects…")
     client = context.bot_data["claude_client"]
     client.invalidate_projects()
     try:
         projects = await asyncio.to_thread(client.list_projects)
-        await update.message.reply_text(f"Done. {len(projects)} project(s) loaded.")
-    except AuthError as e:
-        await update.message.reply_text(f"Auth error: {e}")
+    except AuthError:
+        await status.edit_text(_AUTH_EXPIRED)
         return
-    except Exception as e:
+    except Exception:
         logger.exception("Failed to refresh project list")
-        await update.message.reply_text(f"Refresh failed: {e}")
+        await status.edit_text(
+            "Couldn't reach Claude to reload your projects. Try /refresh again in a moment.",
+        )
         return
+    await status.edit_text(f"{len(projects)} project(s) loaded. Retrying the queue…")
 
     try:
         result = await context.bot_data["queue_processor"].drain(
@@ -217,19 +292,24 @@ async def cmd_refresh(update: Update, context: CustomContext, user: User) -> Non
             context.bot_data["config"],
             client,
         )
-    except Exception as e:
+    except Exception:
         logger.exception("Queue drain failed")
-        await update.message.reply_text(f"Queue drain failed: {e}. It will retry on next /refresh.")
+        await status.edit_text(
+            f"{len(projects)} project(s) loaded, but the queued uploads couldn't be "
+            "retried. They're still queued — run /refresh again in a moment.",
+        )
         return
     if result.uploaded or result.already_existed or result.failed_auth or result.failed_other:
         parts = [f"{result.uploaded} queued upload(s) saved"]
         if result.already_existed:
             parts.append(f"{result.already_existed} already existed")
         if result.failed_auth:
-            parts.append(f"{result.failed_auth} still failing (auth)")
+            parts.append(f"{result.failed_auth} still waiting on a valid token")
         if result.failed_other:
-            parts.append(f"{result.failed_other} still failing (other)")
-        await update.message.reply_text(", ".join(parts) + ".")
+            parts.append(f"{result.failed_other} still failing — see /inqueue")
+        await status.edit_text(f"{len(projects)} project(s) loaded. " + ", ".join(parts) + ".")
+    else:
+        await status.edit_text(f"{len(projects)} project(s) loaded. Nothing was queued.")
 
 
 async def drain_queue(
@@ -248,39 +328,8 @@ async def drain_queue(
     return await proc.drain(telegram_app, config, client)
 
 
-_TELEGRAM_MAX_MESSAGE_LENGTH = 4096
 _INQUEUE_MAX_ENTRIES = 10  # per-section cap before a "+N more" trailer
-_STUCK_MARKER = "⚠️ "  # prefix for entries with upload_attempts > 0
-
-
-def _capped(text: str) -> str:
-    """Telegram rejects anything longer than 4096 characters outright, so a long listing
-    is truncated with a visible marker rather than being lost to a send failure."""
-    if len(text) <= _TELEGRAM_MAX_MESSAGE_LENGTH:
-        return text
-    note = "\n… (truncated)"
-    return text[: _TELEGRAM_MAX_MESSAGE_LENGTH - len(note)] + note
-
-
-def _fmt_ts(iso: str) -> str:
-    """Absolute 'YYYY-MM-DD HH:MM' slice of an ISO-8601 string. Absolute, not
-    relative — a relative "2h ago" goes stale/misleading if the message sits unread."""
-    return iso[:16].replace("T", " ")
-
-
-def _cap_entries(
-    entry_lines: list[list[str]],
-    max_entries: int = _INQUEUE_MAX_ENTRIES,
-) -> list[str]:
-    """Flatten up to max_entries formatted entries (each a list of its own lines: a
-    bullet line plus any indented detail lines) and append a '+N more' trailer instead
-    of hard-truncating mid-bullet."""
-    capped = entry_lines[:max_entries]
-    lines = [line for entry in capped for line in entry]
-    remaining = len(entry_lines) - len(capped)
-    if remaining > 0:
-        lines.append(f"+{remaining} more")
-    return lines
+_STUCK_MARKER = "🛑 "  # prefix for entries with upload_attempts > 0; matches the stuck alert
 
 
 @_require_auth
@@ -288,78 +337,93 @@ async def cmd_inqueue(update: Update, context: CustomContext, user: User) -> Non
     if update.message is None:
         return
 
-    lines: list[str] = ["📊 Queue status", ""]
+    sections: list[list[str]] = []  # one block per non-empty subsystem
+    footers: list[str] = []  # standing facts that are true even when nothing is queued
+    problems: list[str] = []  # subsystems whose state we couldn't read at all
 
     # 🔁 Retry queue — QueueEntry: has upload_attempts and is the only section /refresh drains.
     queue: Queue = context.bot_data["queue"]
     retry_entries = queue.peek()
     if retry_entries:
-        lines.append(f"🔁 Retry queue — {len(retry_entries)} queued")
+        block = [f"🔁 {bold(f'Retry queue — {len(retry_entries)} queued')}"]
         entry_lines = []
         for e in retry_entries:
             marker = _STUCK_MARKER if e.upload_attempts else ""
-            title = escape_markdown(e.video_title or e.file_name, version=1)
+            title = video_link(e.video_title, e.video_id)
             attempts = f" — {e.upload_attempts} failed attempts" if e.upload_attempts else ""
-            detail = f"  queued {_fmt_ts(e.queued_at)}"
+            detail = f"  queued {fmt_ts(e.queued_at)}"
             if e.upload_attempts:
                 detail += " — run /refresh to retry"
             entry_lines.append([f"• {marker}{title}{attempts}", detail])
-        lines.extend(_cap_entries(entry_lines))
-    else:
-        lines.append("🔁 Retry queue: empty")
-
-    lines.append("")
+        block.extend(cap_entries(entry_lines, _INQUEUE_MAX_ENTRIES))
+        sections.append(block)
 
     # ⏳ Poller pending — PendingVideo: has upload_attempts and channel_name, no /refresh.
     state_path = context.bot_data["config"].storage.data_dir / "poller_state.json"
     try:
         state = PollerState.load(state_path)
-    except PersistenceError as e:
+    except PersistenceError:
         logger.exception("Failed to read poller state")
-        lines.append(f"⏳ Poller: (error: {escape_markdown(str(e), version=1)})")
+        problems.append("⏳ Couldn't read the poller's state — check the logs.")
     else:
         if state.pending:
-            lines.append(f"⏳ Poller — {len(state.pending)} pending")
+            header = f"Poller — {len(state.pending)} waiting to upload"
+            block = [f"⏳ {bold(header)}"]
             entry_lines = []
             for v in state.pending:
                 marker = _STUCK_MARKER if v.upload_attempts else ""
-                title = escape_markdown(v.title, version=1)
-                channel_name = escape_markdown(v.channel_name, version=1)
+                title = video_link(v.title, v.video_id)
                 attempts = f" — {v.upload_attempts} failed attempts" if v.upload_attempts else ""
-                detail = f"  seen {_fmt_ts(v.first_seen)}"
-                entry_lines.append([f"• {marker}{title} — {channel_name}{attempts}", detail])
-            lines.extend(_cap_entries(entry_lines))
-        else:
-            lines.append("⏳ Poller: empty")
+                detail = f"  seen {fmt_ts(v.first_seen)}"
+                entry_lines.append([f"• {marker}{title} — {esc(v.channel_name)}{attempts}", detail])
+            block.extend(cap_entries(entry_lines, _INQUEUE_MAX_ENTRIES))
+            sections.append(block)
         if state.seen:
-            lines.append(f"{len(state.seen)} videos seen total")
-
-    lines.append("")
+            footers.append(f"{len(state.seen)} videos seen since the poller started.")
 
     # 📥 Blocked transcripts — PendingTranscript: has channel_name, no upload_attempts, no
     # /refresh hint (drained automatically by the periodic retrier, not by /refresh).
-    lines.append("📥 Blocked transcripts")
     try:
         pending_transcripts = context.bot_data["pending_transcripts"].load()
-    except PersistenceError as e:
+    except PersistenceError:
         logger.exception("Failed to read pending transcripts")
-        lines[-1] += f": (error: {escape_markdown(str(e), version=1)})"
+        problems.append("📥 Couldn't read the blocked-transcript list — check the logs.")
     else:
         if pending_transcripts:
-            lines[-1] += f" — {len(pending_transcripts)} blocked"
-            entry_lines = [
-                [
-                    f"• {escape_markdown(t.video_title, version=1)}"
-                    f" — {escape_markdown(t.channel_name, version=1)}",
-                    f"  queued {_fmt_ts(t.queued_at)}",
-                ]
-                for t in pending_transcripts
-            ]
-            lines.extend(_cap_entries(entry_lines))
-        else:
-            lines[-1] += ": empty"
+            header = f"Blocked transcripts — {len(pending_transcripts)}"
+            block = [f"📥 {bold(header)}", "Retrying automatically; nothing to do."]
+            block.extend(
+                cap_entries(
+                    [
+                        [
+                            f"• {video_link(t.video_title, t.video_id)} — {esc(t.channel_name)}",
+                            f"  queued {fmt_ts(t.queued_at)}",
+                        ]
+                        for t in pending_transcripts
+                    ],
+                    _INQUEUE_MAX_ENTRIES,
+                ),
+            )
+            sections.append(block)
 
-    await update.message.reply_text(_capped("\n".join(lines)), parse_mode="Markdown")
+    # Empty state (UH35): say the useful thing once instead of printing three headers
+    # whose only content is the word "empty".
+    if not sections and not problems:
+        lines = ["✅ Nothing queued — everything's up to date."]
+    else:
+        lines = ["📊 " + bold("Queue status")]
+        for block in [*sections, *([p] for p in problems)]:
+            lines.append("")  # one blank line between blocks, never two
+            lines.extend(block)
+    if footers:
+        lines.append("")
+        lines.extend(footers)
+
+    await update.message.reply_text(
+        cap_message("\n".join(lines).strip()),
+        parse_mode=PARSE_MODE,
+        link_preview_options=NO_PREVIEW,
+    )
 
 
 _SUBSCRIBE_PREFIX = "sub:"  # routes a project-picker callback to the subscribe handler
@@ -408,27 +472,30 @@ async def cmd_subscribed(update: Update, context: CustomContext, user: User) -> 
     config = context.bot_data["config"]
     try:
         channels = load_channels(config.poller.channels_path)
-    except PersistenceError as e:
+    except PersistenceError:
         logger.exception("Failed to read the channel list")
-        await update.message.reply_text(f"Couldn't read the channel list: {e}")
+        await update.message.reply_text(
+            "Couldn't read the list of watched channels — check the logs.",
+        )
         return
 
     if not channels:
         await update.message.reply_text(
-            "Not watching any channels yet. Add one with /subscribe <youtube link>.",
+            "Not watching any channels yet.\n\n"
+            "Add one with /subscribe followed by a link to any of its videos.",
         )
         return
 
     names = await _project_names(context)
     default = config.poller.auto_transcript_project
 
-    lines = [f"📺 Watching {len(channels)} channel(s)", ""]
+    lines = [f"📺 {bold(f'Watching {len(channels)} channel(s)')}", ""]
     for ch in channels:
-        lines.append(f"• {ch.name} ({ch.handle})")
+        lines.append(f"• {esc(ch.name)} ({esc(ch.handle)})")
         if ch.project:
-            lines.append(f"  → {_project_label(ch.project, names)}")
+            lines.append(f"  → {esc(_project_label(ch.project, names))}")
         elif default:
-            lines.append(f"  → {_project_label(default, names)} (default)")
+            lines.append(f"  → {esc(_project_label(default, names))} (default)")
         else:
             lines.append("  → no project")
 
@@ -439,33 +506,22 @@ async def cmd_subscribed(update: Update, context: CustomContext, user: User) -> 
             f"transcripts upload {_fmt_upload_delay()} after a video is published.",
         )
     else:
-        lines.append("⚠️ AUTO_TRANSCRIPT_PROJECT is not set — auto-upload is off.")
+        lines.append(
+            "⚠️ Auto-upload is off: no default project is configured "
+            f"({code('AUTO_TRANSCRIPT_PROJECT')} is unset), so nothing here is being "
+            "picked up.",
+        )
 
-    # Plain text, no parse_mode: channel names are arbitrary user-facing strings and this
-    # listing gains nothing from Markdown (see docs/bugs/unescaped-markdown-injection.md).
-    await update.message.reply_text(_capped("\n".join(lines)))
+    await update.message.reply_text(cap_message("\n".join(lines)), parse_mode=PARSE_MODE)
 
 
-def _subscribe_keyboard(
+def _with_subscribe_default(
+    keyboard: InlineKeyboardMarkup,
     projects: list[Project],
     msg_id: int | str,
     config: Config,
-    *,
-    show_all: bool = False,
 ) -> InlineKeyboardMarkup:
-    """The upload picker's keyboard, prefixed for the subscribe flow and topped with a
-    row for inheriting AUTO_TRANSCRIPT_PROJECT — the common case, since most channels
-    are watched for the same project."""
-    keyboard = (
-        _keyboard_for(projects, msg_id, _SUBSCRIBE_PREFIX)
-        if show_all
-        else _build_keyboard(
-            projects,
-            msg_id,
-            config.telegram.project_whitelist,
-            _SUBSCRIBE_PREFIX,
-        )
-    )
+    """Top a subscribe-flow project keyboard with the global-default choice."""
     rows = [list(row) for row in keyboard.inline_keyboard]
     default = config.poller.auto_transcript_project
     if default:
@@ -482,6 +538,31 @@ def _subscribe_keyboard(
     return InlineKeyboardMarkup(rows)
 
 
+def _subscribe_keyboard(
+    projects: list[Project],
+    msg_id: int | str,
+    config: Config,
+) -> InlineKeyboardMarkup:
+    """Whitelist-filtered subscribe picker, including the global-default choice."""
+    keyboard = _build_keyboard(
+        projects,
+        msg_id,
+        config.telegram.project_whitelist,
+        _SUBSCRIBE_PREFIX,
+    )
+    return _with_subscribe_default(keyboard, projects, msg_id, config)
+
+
+def _all_subscribe_keyboard(
+    projects: list[Project],
+    msg_id: int | str,
+    config: Config,
+) -> InlineKeyboardMarkup:
+    """Unfiltered subscribe picker shown after the user taps “More…”."""
+    keyboard = _keyboard_for(projects, msg_id, _SUBSCRIBE_PREFIX)
+    return _with_subscribe_default(keyboard, projects, msg_id, config)
+
+
 @_require_auth
 async def cmd_subscribe(update: Update, context: CustomContext, user: User) -> None:
     if update.message is None or context.user_data is None:
@@ -490,41 +571,50 @@ async def cmd_subscribe(update: Update, context: CustomContext, user: User) -> N
     args = context.args or []
     if not args:
         await update.message.reply_text(
-            "Usage: /subscribe <youtube link>\n\n"
-            "Send a link to any video from the channel (or the channel's @handle) and "
-            "I'll watch it for new uploads.",
+            "Send a link to any video from the channel — or the channel's @handle — and "
+            "I'll watch it for new uploads.\n\n"
+            "For example: /subscribe @veritasium",
         )
         return
 
     config = context.bot_data["config"]
-    await update.message.reply_text("Looking up the channel...")
+    # One status message, edited in place through the lookup and into the picker, so the
+    # chat doesn't accumulate a dead "Looking up..." line on every subscribe.
+    status = await update.message.reply_text("Looking up the channel…")
     try:
         resolved = await asyncio.to_thread(resolve_subscription, args[0], config.transcript.proxy)
     except SubscriptionError as e:
-        await update.message.reply_text(str(e))
+        # SubscriptionError messages are written as user-facing copy (see subscriptions.py).
+        await status.edit_text(esc(str(e)), parse_mode=PARSE_MODE)
         return
 
     try:
         channels = load_channels(config.poller.channels_path)
-    except PersistenceError as e:
+    except PersistenceError:
         logger.exception("Failed to read the channel list")
-        await update.message.reply_text(f"Couldn't read the channel list: {e}")
+        await status.edit_text("Couldn't read the list of watched channels — check the logs.")
         return
     existing = find_subscription(channels, resolved)
     if existing is not None:
-        await update.message.reply_text(
-            f"Already watching {existing.name} ({existing.handle}). See /subscribed.",
+        await status.edit_text(
+            f"Already watching {bold(existing.name)} ({esc(existing.handle)}).\n"
+            "See /subscribed for where its transcripts go.",
+            parse_mode=PARSE_MODE,
         )
         return
 
-    projects = await _projects_for_picker(context, update.message.reply_text)
-    if projects is None:
+    picker = await _projects_for_picker(context, status.edit_text)
+    if picker is None:
         return
+    projects, warning = picker
 
     msg_id = update.message.message_id
     context.user_data[f"subscribe_{msg_id}"] = resolved
-    await update.message.reply_text(
-        f"Found {resolved.name} ({resolved.handle}).\n\nWhere should its transcripts go?",
+    prefix = f"{esc(warning)}\n\n" if warning else ""
+    await status.edit_text(
+        f"{prefix}Found {bold(resolved.name)} ({esc(resolved.handle)}).\n\n"
+        "Where should its transcripts go?",
+        parse_mode=PARSE_MODE,
         reply_markup=_subscribe_keyboard(projects, msg_id, config),
     )
 
@@ -539,7 +629,7 @@ async def handle_subscribe_selection(update: Update, context: CustomContext, use
 
     parts = query.data.removeprefix(_SUBSCRIBE_PREFIX).split(":", 1)
     if len(parts) != 2:
-        await query.edit_message_text("Invalid selection data.")
+        await query.edit_message_text(_STALE_SUBSCRIBE_SESSION)
         return
     choice, msg_id_str = parts
     config = context.bot_data["config"]
@@ -547,20 +637,24 @@ async def handle_subscribe_selection(update: Update, context: CustomContext, use
     if choice == "more":
         try:
             projects = await asyncio.to_thread(context.bot_data["claude_client"].list_projects)
-        except AuthError as e:
+        except AuthError:
             # Not query.answer(): the handler already answered above, and Telegram
             # delivers only the first answer — a second one is silently dropped, so a
             # dead-token tap would appear to do nothing. Report in the message instead.
-            await query.edit_message_text(f"Auth error: {e}")
+            await query.edit_message_text(_AUTH_EXPIRED)
+            return
+        except RequestException:
+            logger.exception("Failed to load full project list for subscribe picker")
+            await query.edit_message_text(_PROJECTS_UNREACHABLE)
             return
         await query.edit_message_reply_markup(
-            reply_markup=_subscribe_keyboard(projects, msg_id_str, config, show_all=True),
+            reply_markup=_all_subscribe_keyboard(projects, msg_id_str, config),
         )
         return
 
     resolved: ResolvedChannel | None = context.user_data.get(f"subscribe_{msg_id_str}")
     if resolved is None:
-        await query.edit_message_text("Session expired. Please run /subscribe again.")
+        await query.edit_message_text(_STALE_SUBSCRIBE_SESSION)
         return
 
     project = None if choice == _SUBSCRIBE_DEFAULT else choice
@@ -571,16 +665,21 @@ async def handle_subscribe_selection(update: Update, context: CustomContext, use
             resolved,
             project,
         )
-    except PersistenceError as e:
+    except PersistenceError:
         logger.exception("Failed to add %s to the channel list", resolved.handle)
-        await query.edit_message_text(f"Couldn't save the subscription: {e}")
+        await query.edit_message_text(
+            "Couldn't save the subscription — check the logs, then try /subscribe again.",
+        )
         return
 
     context.user_data.pop(f"subscribe_{msg_id_str}", None)
     if added is None:
         # Someone (or something) added the same channel between the /subscribe check
         # and this tap — the end state is what the user wanted either way.
-        await query.edit_message_text(f"Already watching {resolved.name}.")
+        await query.edit_message_text(
+            f"Already watching {bold(resolved.name)}.",
+            parse_mode=PARSE_MODE,
+        )
         return
 
     logger.info(
@@ -589,20 +688,23 @@ async def handle_subscribe_selection(update: Update, context: CustomContext, use
         added.channel_id,
         project or "default",
     )
-    lines = [f"✅ Watching {added.name} ({added.handle})."]
+    lines = [f"✅ Watching {bold(added.name)} ({esc(added.handle)})."]
     default = config.poller.auto_transcript_project
     if default is None:
         # Without it the poller task never starts at all (see main.py), so a per-channel
         # project of its own wouldn't get this channel uploaded either.
-        lines.append("⚠️ AUTO_TRANSCRIPT_PROJECT is not set — auto-upload is off until it is.")
+        lines.append(
+            f"⚠️ Nothing will upload yet: {code('AUTO_TRANSCRIPT_PROJECT')} is unset, which "
+            "keeps the poller switched off entirely.",
+        )
     else:
         names = await _project_names(context)
         lines.append(
-            f"New videos go to {_project_label(project or default, names)}, "
+            f"New videos go to {bold(_project_label(project or default, names))}, "
             f"picked up within {_fmt_interval(config.poller.poll_interval)} and uploaded "
             f"{_fmt_upload_delay()} after publication.",
         )
-    await query.edit_message_text("\n".join(lines))
+    await query.edit_message_text("\n".join(lines), parse_mode=PARSE_MODE)
 
 
 @_require_auth
@@ -612,11 +714,16 @@ async def handle_youtube_url(update: Update, context: CustomContext, user: User)
 
     url = update.message.text.strip()
     if not extract_video_id(url):
-        await update.message.reply_text("Couldn't parse a video ID from that URL.")
+        await update.message.reply_text(
+            "I couldn't find a video ID in that link. Send a normal youtube.com/watch, "
+            "youtu.be or /shorts link.",
+        )
         return
 
     logger.info("New request from user %s: %s", user.id, url)
-    await update.message.reply_text("Fetching video info...")
+    # This status message becomes the project picker below — one message for the whole
+    # interaction, instead of leaving a stale "Fetching..." line behind in the chat.
+    status = await update.message.reply_text("Reading the video's details…")
 
     try:
         metadata = await asyncio.to_thread(
@@ -624,14 +731,18 @@ async def handle_youtube_url(update: Update, context: CustomContext, user: User)
             url,
             context.bot_data["config"].transcript.proxy,
         )
-    except (RequestException, ValueError) as e:
+    except (RequestException, ValueError):
         logger.exception("Failed to fetch metadata for %s", url)
-        await update.message.reply_text(f"Failed to fetch video info: {e}")
+        await status.edit_text(
+            "Couldn't read that video's details. It may be private, deleted or "
+            "region-locked — check the link and try again.",
+        )
         return
 
-    projects = await _projects_for_picker(context, update.message.reply_text)
-    if projects is None:
+    picker = await _projects_for_picker(context, status.edit_text)
+    if picker is None:
         return
+    projects, warning = picker
 
     msg_id = update.message.message_id
     context.user_data[f"video_{msg_id}"] = metadata
@@ -642,11 +753,10 @@ async def handle_youtube_url(update: Update, context: CustomContext, user: User)
         context.bot_data["config"].telegram.project_whitelist,
     )
 
-    safe_title = escape_markdown(metadata.title, version=1)
-    safe_channel = escape_markdown(metadata.channel_name, version=1)
-    await update.message.reply_text(
-        f"*{safe_title}*\n_{safe_channel}_\n\nSelect a project:",
-        parse_mode="Markdown",
+    prefix = f"{esc(warning)}\n\n" if warning else ""
+    await status.edit_text(
+        f"{prefix}{bold(metadata.title)}\n{esc(metadata.channel_name)}\n\nWhich project?",
+        parse_mode=PARSE_MODE,
         reply_markup=keyboard,
     )
 
@@ -663,7 +773,7 @@ async def handle_project_selection(update: Update, context: CustomContext, user:
         return
     parts = query.data.split(":", 1)
     if len(parts) != 2:
-        await query.edit_message_text("Invalid selection data.")
+        await query.edit_message_text(_STALE_UPLOAD_SESSION)
         return
 
     project_id, msg_id_str = parts
@@ -672,8 +782,12 @@ async def handle_project_selection(update: Update, context: CustomContext, user:
         case "more":
             try:
                 projects = await asyncio.to_thread(context.bot_data["claude_client"].list_projects)
-            except AuthError as e:
-                await query.answer(str(e)[:200])
+            except AuthError:
+                await query.edit_message_text(_AUTH_EXPIRED)
+                return
+            except RequestException:
+                logger.exception("Failed to load full project list for upload picker")
+                await query.edit_message_text(_PROJECTS_UNREACHABLE)
                 return
             keyboard = _keyboard_for(projects, msg_id_str)
             await query.edit_message_reply_markup(reply_markup=keyboard)
@@ -682,12 +796,14 @@ async def handle_project_selection(update: Update, context: CustomContext, user:
     metadata: VideoMetadata | None = context.user_data.get(f"video_{msg_id_str}")
 
     if metadata is None:
-        await query.edit_message_text("Session expired. Please send the URL again.")
+        await query.edit_message_text(_STALE_UPLOAD_SESSION)
         return
 
     file_name = build_doc_name(metadata.channel_name, metadata.title, metadata.upload_date)
+    project_name = _project_label(project_id, await _project_names(context))
+    subject_line = subject(metadata.title, metadata.channel_name, metadata.video_id)
 
-    await query.edit_message_text("Checking project...")
+    await query.edit_message_text("Checking the project for a copy…")
 
     docs: list[Doc] | None
     try:
@@ -701,9 +817,12 @@ async def handle_project_selection(update: Update, context: CustomContext, user:
         # and correctly return DeferredForAuth for the queuing logic below, instead of
         # dead-ending here before a transcript was ever fetched.
         docs = None
-    except Exception as e:
+    except Exception:
         logger.exception("Failed to list docs for project %s", project_id)
-        await query.edit_message_text(f"Failed to check for duplicates: {e}")
+        await query.edit_message_text(
+            "Couldn't reach Claude to check whether this is already saved. "
+            "Send the link again in a moment.",
+        )
         return
 
     existing = (
@@ -715,6 +834,7 @@ async def handle_project_selection(update: Update, context: CustomContext, user:
             file_name=file_name,
             video_id=metadata.video_id,
             channel_name=metadata.channel_name,
+            video_title=metadata.title,
         )
         keyboard = InlineKeyboardMarkup(
             [
@@ -727,15 +847,16 @@ async def handle_project_selection(update: Update, context: CustomContext, user:
                 ],
             ],
         )
-        safe_name = escape_markdown(file_name, version=1)
         await query.edit_message_text(
-            f"⚠️ *{safe_name}* already exists in this project.\n\nSkip or overwrite?",
-            parse_mode="Markdown",
+            f"⚠️ Already in {bold(project_name)}\n{subject_line}\n\n"
+            "Overwrite it with a fresh transcript, or skip?",
+            parse_mode=PARSE_MODE,
             reply_markup=keyboard,
+            link_preview_options=NO_PREVIEW,
         )
         return
 
-    await query.edit_message_text("Fetching transcript...")
+    await query.edit_message_text("Fetching the transcript…")
 
     logger.info("Fetching transcript for %s", file_name)
     try:
@@ -747,8 +868,9 @@ async def handle_project_selection(update: Update, context: CustomContext, user:
         )
     except TranscriptUnavailable:
         await query.edit_message_text(
-            f"No captions available for *{escape_markdown(metadata.title, version=1)}*.",
-            parse_mode="Markdown",
+            f"{subject_line}\n\nThis video has no captions, so there's nothing to save.",
+            parse_mode=PARSE_MODE,
+            link_preview_options=NO_PREVIEW,
         )
         return
     except TranscriptTransportError:
@@ -768,13 +890,16 @@ async def handle_project_selection(update: Update, context: CustomContext, user:
         except PersistenceError:
             logger.exception("Failed to persist pending transcript for %s", file_name)
             await query.edit_message_text(
-                "Transcript request was blocked and could not be queued for retry — "
-                "please resend the URL shortly.",
+                "YouTube blocked the transcript request, and I couldn't queue a retry. "
+                "Send the link again in a few minutes.",
             )
             return
         await query.edit_message_text(
-            "Transcript request was blocked — this is usually temporary. It's been "
-            "queued and will retry automatically.",
+            f"⏳ Queued for {bold(project_name)}\n{subject_line}\n\n"
+            "YouTube blocked the transcript request — usually temporary. "
+            "I'll keep retrying and confirm when it lands.",
+            parse_mode=PARSE_MODE,
+            link_preview_options=NO_PREVIEW,
         )
         return
 
@@ -796,20 +921,22 @@ async def handle_project_selection(update: Update, context: CustomContext, user:
                     video_title=metadata.title,
                     channel_name=metadata.channel_name,
                     uploaded_at=datetime.now(UTC).isoformat(),
+                    video_id=metadata.video_id,
                 ),
             )
             await query.edit_message_text(
-                f"Saved *{escape_markdown(file_name, version=1)}* to project.",
-                parse_mode="Markdown",
+                f"✅ Saved to {bold(project_name)}\n{subject_line}",
+                parse_mode=PARSE_MODE,
+                link_preview_options=NO_PREVIEW,
             )
         case AlreadyExists():
             # Rare race: a doc with this name appeared between the check above and
             # this upload attempt. Same "nothing to do" outcome as the check finding
             # it up front.
             await query.edit_message_text(
-                f"*{escape_markdown(file_name, version=1)}* already exists in this "
-                "project — nothing uploaded.",
-                parse_mode="Markdown",
+                f"Already in {bold(project_name)}\n{subject_line}\n\nNothing uploaded.",
+                parse_mode=PARSE_MODE,
+                link_preview_options=NO_PREVIEW,
             )
         case DeferredForAuth():
             if update.effective_chat is None:
@@ -829,19 +956,23 @@ async def handle_project_selection(update: Update, context: CustomContext, user:
             except PersistenceError:
                 logger.exception("Failed to enqueue %s", file_name)
                 await query.edit_message_text(
-                    "Token expired and queuing failed — please resend the URL after "
-                    "updating the token.",
+                    "Your session token has expired and I couldn't hold the transcript "
+                    "for later. Update the token and send the link again.",
                 )
                 return
-            escaped = escape_markdown(file_name, version=1)
-            if added:
-                msg = f"Token expired — *{escaped}* queued. Run /refresh after updating the token."
-            else:
-                msg = f"Token expired — *{escaped}* was already queued."
-            await query.edit_message_text(msg, parse_mode="Markdown")
+            await query.edit_message_text(
+                token_expired_message(subject_line, newly_queued=added is not None),
+                parse_mode=PARSE_MODE,
+                link_preview_options=NO_PREVIEW,
+            )
         case RetryPending(step=step, error=error):
             logger.warning("Upload failed for %s while %s: %s", file_name, step, error)
-            await query.edit_message_text(f"Upload failed while {step}: {error}")
+            await query.edit_message_text(
+                f"Couldn't save this to {bold(project_name)}.\n{subject_line}\n\n"
+                "Nothing was queued — send the link again to retry.",
+                parse_mode=PARSE_MODE,
+                link_preview_options=NO_PREVIEW,
+            )
 
 
 @_require_auth
@@ -858,24 +989,27 @@ async def handle_duplicate_choice(update: Update, context: CustomContext, user: 
 
     if action == "skip":
         if not rest:
-            await query.edit_message_text("Invalid choice data.")
+            await query.edit_message_text(_STALE_UPLOAD_SESSION)
             return
         msg_id_str = rest[0]
         context.user_data.pop(f"video_{msg_id_str}", None)
         context.user_data.pop(f"pending_{msg_id_str}", None)
-        await query.edit_message_text("Already in project — skipped.")
+        await query.edit_message_text("Skipped — the existing copy was left alone.")
         return
 
     if len(rest) < 2:
-        await query.edit_message_text("Invalid choice data.")
+        await query.edit_message_text(_STALE_UPLOAD_SESSION)
         return
     doc_uuid, msg_id_str = rest[0], rest[1]
     pending: PendingUpload | None = context.user_data.get(f"pending_{msg_id_str}")
     if pending is None:
-        await query.edit_message_text("Session expired. Please send the URL again.")
+        await query.edit_message_text(_STALE_UPLOAD_SESSION)
         return
 
-    await query.edit_message_text("Fetching transcript...")
+    subject_line = subject(pending["video_title"], pending["channel_name"], pending["video_id"])
+    project_name = _project_label(pending["project_id"], await _project_names(context))
+
+    await query.edit_message_text("Fetching the transcript…")
 
     logger.info("Fetching transcript for overwrite: %s", pending["file_name"])
     try:
@@ -887,8 +1021,10 @@ async def handle_duplicate_choice(update: Update, context: CustomContext, user: 
         )
     except TranscriptUnavailable:
         await query.edit_message_text(
-            f"No captions available for *{escape_markdown(pending['file_name'], version=1)}*.",
-            parse_mode="Markdown",
+            f"{subject_line}\n\nThis video has no captions, so there's nothing to "
+            "overwrite the existing copy with.",
+            parse_mode=PARSE_MODE,
+            link_preview_options=NO_PREVIEW,
         )
         return
     except TranscriptTransportError:
@@ -899,7 +1035,7 @@ async def handle_duplicate_choice(update: Update, context: CustomContext, user: 
             project_id=pending["project_id"],
             video_id=pending["video_id"],
             file_name=pending["file_name"],
-            video_title=pending["file_name"],
+            video_title=pending["video_title"],
             queued_at=datetime.now(UTC).isoformat(),
             channel_name=pending["channel_name"],
             overwrite_doc_uuid=doc_uuid,
@@ -909,13 +1045,16 @@ async def handle_duplicate_choice(update: Update, context: CustomContext, user: 
         except PersistenceError:
             logger.exception("Failed to persist pending transcript for %s", pending["file_name"])
             await query.edit_message_text(
-                "Transcript request was blocked and could not be queued for retry — "
-                "please retry the overwrite shortly.",
+                "YouTube blocked the transcript request, and I couldn't queue a retry. "
+                "Send the link again in a few minutes.",
             )
             return
         await query.edit_message_text(
-            "Transcript request was blocked — this is usually temporary. It's been "
-            "queued and will retry automatically.",
+            f"⏳ Overwrite queued for {bold(project_name)}\n{subject_line}\n\n"
+            "YouTube blocked the transcript request — usually temporary. "
+            "I'll keep retrying and confirm when it lands.",
+            parse_mode=PARSE_MODE,
+            link_preview_options=NO_PREVIEW,
         )
         return
 
@@ -933,25 +1072,27 @@ async def handle_duplicate_choice(update: Update, context: CustomContext, user: 
         file_name=pending["file_name"],
         transcript=transcript,
         chat_id=update.effective_chat.id,
-        video_title=pending["file_name"],
+        video_title=pending["video_title"],
         queued_at=datetime.now(UTC).isoformat(),
         channel_name=pending["channel_name"],
         overwrite_doc_uuid=doc_uuid,
     )
     queue: Queue = context.bot_data["queue"]
-    escaped = escape_markdown(pending["file_name"], version=1)
     try:
         persisted = queue.enqueue(draft)
     except PersistenceError:
         logger.exception("Failed to durably queue overwrite for %s", pending["file_name"])
         await query.edit_message_text(
-            "Overwrite failed to queue durably — please retry the overwrite.",
+            "I couldn't record the overwrite safely, so I stopped before touching the "
+            "existing copy. It's untouched — send the link again to retry.",
         )
         return
     if persisted is None:
         await query.edit_message_text(
-            f"Overwrite of *{escaped}* is already queued — run /refresh once it completes.",
-            parse_mode="Markdown",
+            f"{subject_line}\n\nThis overwrite is already queued — run /refresh once "
+            "your token is valid again.",
+            parse_mode=PARSE_MODE,
+            link_preview_options=NO_PREVIEW,
         )
         return
 
@@ -960,13 +1101,14 @@ async def handle_duplicate_choice(update: Update, context: CustomContext, user: 
         # A concurrent /refresh or token-update drain already claimed it — it will
         # complete there; nothing left for this handler to do.
         await query.edit_message_text(
-            f"Overwrite of *{escaped}* is already in progress — will confirm shortly.",
-            parse_mode="Markdown",
+            f"{subject_line}\n\nThis overwrite is already running — I'll confirm shortly.",
+            parse_mode=PARSE_MODE,
+            link_preview_options=NO_PREVIEW,
         )
         return
 
     logger.info("Overwriting %s in project %s", pending["file_name"], pending["project_id"])
-    await query.edit_message_text("Overwriting...")
+    await query.edit_message_text("Replacing the existing copy…")
 
     service = TranscriptUploadService(context.bot_data["claude_client"])
     try:
@@ -993,30 +1135,45 @@ async def handle_duplicate_choice(update: Update, context: CustomContext, user: 
                         video_title=claimed.video_title,
                         channel_name=claimed.channel_name,
                         uploaded_at=datetime.now(UTC).isoformat(),
+                        video_id=claimed.video_id,
                     ),
                 )
                 await query.edit_message_text(
-                    f"Saved *{escaped}* to project.",
-                    parse_mode="Markdown",
+                    f"✅ Replaced in {bold(project_name)}\n{subject_line}",
+                    parse_mode=PARSE_MODE,
+                    link_preview_options=NO_PREVIEW,
                 )
             case AlreadyExists():
                 # Old doc already gone and a replacement already exists: a prior
                 # attempt landed and we just never saw the confirmation.
                 queue.ack(claimed.id)
                 await query.edit_message_text(
-                    f"*{escaped}* was already overwritten.",
-                    parse_mode="Markdown",
+                    f"✅ Already replaced in {bold(project_name)}\n{subject_line}",
+                    parse_mode=PARSE_MODE,
+                    link_preview_options=NO_PREVIEW,
                 )
-            case DeferredForAuth(step=step, error=error):
+            case DeferredForAuth():
                 queue.release(claimed.id)
                 await query.edit_message_text(
-                    f"Auth error while {step} — overwrite queued for retry: {error}",
+                    f"⏳ Waiting on a valid token\n{subject_line}\n\n"
+                    "The replacement is queued. Update your Claude session token, "
+                    "then run /refresh.",
+                    parse_mode=PARSE_MODE,
+                    link_preview_options=NO_PREVIEW,
                 )
             case RetryPending(step=step, error=error):
+                logger.warning(
+                    "Overwrite failed for %s while %s: %s",
+                    claimed.file_name,
+                    step,
+                    error,
+                )
                 queue.release(claimed.id, increment_attempts=True)
                 await query.edit_message_text(
-                    f"Overwrite failed while {step}: {error}. It has been queued and will "
-                    "retry automatically.",
+                    f"⏳ Couldn't replace it just now\n{subject_line}\n\n"
+                    "It's queued and will retry automatically.",
+                    parse_mode=PARSE_MODE,
+                    link_preview_options=NO_PREVIEW,
                 )
     except Exception:
         # Anything unexpected (a programming error, a malformed API response) must
@@ -1026,7 +1183,8 @@ async def handle_duplicate_choice(update: Update, context: CustomContext, user: 
         logger.exception("Unexpected error during overwrite for %s", claimed.file_name)
         queue.release(claimed.id, increment_attempts=True)
         await query.edit_message_text(
-            "Unexpected error during overwrite — it has been queued and will retry automatically.",
+            "Something went wrong while replacing it. The replacement is queued and "
+            "will retry automatically.",
         )
     finally:
         # The durable QueueEntry (not this dict) now owns retry state regardless of
@@ -1036,11 +1194,25 @@ async def handle_duplicate_choice(update: Update, context: CustomContext, user: 
         context.user_data.pop(f"pending_{msg_id_str}", None)
 
 
+async def _register_commands(app: Application) -> None:
+    """Populate Telegram's native command menu, so the commands are discoverable and
+    autocompleted in the client instead of only existing in the /help text.
+
+    Best-effort: a failure here is cosmetic, and must not stop the bot from starting."""
+    try:
+        await app.bot.set_my_commands(
+            [BotCommand(name, description) for name, _usage, description in _COMMANDS],
+        )
+    except Exception:
+        logger.warning("Could not register the Telegram command menu", exc_info=True)
+
+
 def build_application(config: Config) -> Application:
     app = (
         Application.builder()
         .token(config.telegram.bot_token)
         .context_types(ContextTypes(bot_data=BotData))
+        .post_init(_register_commands)
         .build()
     )
     app.bot_data["config"] = config

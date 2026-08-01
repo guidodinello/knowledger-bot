@@ -19,6 +19,7 @@ from .config import DAY_CODES, Config
 from .history import UploadRecord, load_history
 from .logger import get_logger
 from .notify import notify
+from .telegram_format import bold, cap_entries, cap_message, subject
 
 logger = get_logger(__name__)
 
@@ -43,9 +44,12 @@ def _next_occurrence(day: str, hour: int, now: datetime) -> datetime:
     return candidate
 
 
+_MAX_PER_PROJECT = 8  # beyond this a single busy project crowds out every other one
+
+
 def _format_recap(records: list[UploadRecord], project_names: dict[str, str]) -> str:
     if not records:
-        return "No transcripts uploaded this week."
+        return "Nothing was uploaded this week."
 
     by_project: dict[str, list[UploadRecord]] = defaultdict(list)
     for record in records:
@@ -56,13 +60,15 @@ def _format_recap(records: list[UploadRecord], project_names: dict[str, str]) ->
     lines = []
     for project_id, project_records in ordered:
         name = project_names.get(project_id, project_id)
-        lines.append(f"{name} ({len(project_records)})")
-        for record in project_records:
-            suffix = f" — {record.channel_name}" if record.channel_name else ""
-            lines.append(f"• “{record.video_title}”{suffix}")
+        lines.append(bold(f"{name} ({len(project_records)})"))
+        entries = [
+            [f"• {subject(r.video_title, r.channel_name, r.video_id)}"] for r in project_records
+        ]
+        lines.extend(cap_entries(entries, _MAX_PER_PROJECT))
         lines.append("")
 
-    lines.append(f"{len(records)} transcripts uploaded this week.")
+    plural = "transcript" if len(records) == 1 else "transcripts"
+    lines.append(f"{len(records)} {plural} uploaded this week.")
     return "\n".join(lines).strip()
 
 
@@ -77,8 +83,11 @@ async def _send_recap(app: Application, config: Config, client: ClaudeClient) ->
 
     window_start = (now - RECAP_WINDOW).date().isoformat()
     window_end = now.date().isoformat()
-    header = f"\U0001f4c5 Weekly recap — {window_start} to {window_end}\n\n"
-    await notify(app, config, header + _format_recap(recent, project_names))
+    header = bold(f"\U0001f4c5 Weekly recap — {window_start} to {window_end}") + "\n\n"
+    # cap_message is not optional here: notify() swallows send failures as a log
+    # warning, so an over-long recap would be rejected by Telegram and simply never
+    # arrive — the one message a week the user is relying on, silently missing.
+    await notify(app, config, cap_message(header + _format_recap(recent, project_names)))
 
 
 async def run_weekly_recap(app: Application, config: Config) -> None:

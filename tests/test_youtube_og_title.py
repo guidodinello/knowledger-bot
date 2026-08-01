@@ -1,6 +1,6 @@
 import pytest
 
-from knowledger.youtube import _extract_og_title
+from knowledger.youtube import _extract_og_title, fetch_video_metadata
 
 
 def test_extracts_title_in_document_order() -> None:
@@ -36,6 +36,27 @@ def test_missing_tag_returns_none() -> None:
 def test_only_first_matching_tag_is_used() -> None:
     html = '<meta property="og:title" content="First"><meta property="og:title" content="Second">'
     assert _extract_og_title(html) == "First"
+
+
+def test_incomplete_oembed_metadata_raises_value_error(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    class IncompleteResponse:
+        status_code = 200
+
+        def raise_for_status(self) -> None:
+            pass
+
+        def json(self) -> dict[str, str]:
+            return {"title": "A title without an author"}
+
+    monkeypatch.setattr(
+        "knowledger.youtube.requests.get",
+        lambda *args, **kwargs: IncompleteResponse(),
+    )
+
+    with pytest.raises(ValueError, match="incomplete video metadata"):
+        fetch_video_metadata("https://youtu.be/abc123")
 
 
 if __name__ == "__main__":

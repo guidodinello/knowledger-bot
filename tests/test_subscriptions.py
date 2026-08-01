@@ -1,9 +1,11 @@
 import json
+import re
 from pathlib import Path
 
 import pytest
 from curl_cffi.requests.exceptions import RequestException
 
+from knowledger.bot import YOUTUBE_URL_PATTERN
 from knowledger.poller import Channel, PendingVideo, load_channels
 from knowledger.subscriptions import (
     ResolvedChannel,
@@ -55,6 +57,17 @@ def test_extract_channel_handle(text: str, expected: str | None) -> None:
 )
 def test_extract_video_id_accepts_every_youtube_host(text: str, expected: str | None) -> None:
     assert extract_video_id(text) == expected
+
+
+@pytest.mark.parametrize(
+    "url",
+    [
+        "https://m.youtube.com/watch?v=abc123",
+        "https://m.youtube.com/shorts/abc123",
+    ],
+)
+def test_mobile_video_urls_reach_the_upload_handler(url: str) -> None:
+    assert re.fullmatch(YOUTUBE_URL_PATTERN, url)
 
 
 def test_resolve_subscription_from_video_url(monkeypatch: pytest.MonkeyPatch) -> None:

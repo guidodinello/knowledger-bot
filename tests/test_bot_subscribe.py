@@ -5,6 +5,7 @@ from types import SimpleNamespace
 from typing import Any
 
 import pytest
+from curl_cffi.requests.exceptions import RequestException
 from telegram import InlineKeyboardMarkup
 
 from knowledger.bot import cmd_subscribe, cmd_subscribed, handle_subscribe_selection
@@ -36,6 +37,21 @@ class FakeMessage:
         text: str,
         parse_mode: str | None = None,
         reply_markup: InlineKeyboardMarkup | None = None,
+        **kwargs: Any,
+    ) -> "FakeMessage":
+        self.replies.append(text)
+        self.markups.append(reply_markup)
+        # Handlers now send one status message and edit it in place, so reply_text must
+        # hand back something editable. Edits land in the same lists, keeping `replies`
+        # a record of everything the user saw, in order.
+        return self
+
+    async def edit_text(
+        self,
+        text: str,
+        parse_mode: str | None = None,
+        reply_markup: InlineKeyboardMarkup | None = None,
+        **kwargs: Any,
     ) -> None:
         self.replies.append(text)
         self.markups.append(reply_markup)
@@ -51,7 +67,12 @@ class FakeQuery:
     async def answer(self, text: str | None = None) -> None:
         self.answers.append(text)
 
-    async def edit_message_text(self, text: str, parse_mode: str | None = None) -> None:
+    async def edit_message_text(
+        self,
+        text: str,
+        parse_mode: str | None = None,
+        **kwargs: Any,
+    ) -> None:
         self.edits.append(text)
 
     async def edit_message_reply_markup(
@@ -140,7 +161,7 @@ def test_subscribed_lists_channels_with_resolved_project_names(tmp_path: Path) -
     asyncio.run(cmd_subscribed(FakeUpdate(message), FakeContext(config)))  # type: ignore[arg-type]
 
     text = message.replies[0]
-    assert "📺 Watching 2 channel(s)" in text
+    assert "Watching 2 channel(s)" in text
     assert "• José Luis Cava (@Cava)" in text
     assert "→ Investments (default)" in text  # inherits AUTO_TRANSCRIPT_PROJECT, shown by name
     assert "• Dr. La Rosa (@Rosa)" in text
@@ -155,7 +176,7 @@ def test_subscribed_warns_when_auto_upload_is_off(tmp_path: Path) -> None:
 
     asyncio.run(cmd_subscribed(FakeUpdate(message), FakeContext(config)))  # type: ignore[arg-type]
 
-    assert "AUTO_TRANSCRIPT_PROJECT is not set" in message.replies[0]
+    assert "AUTO_TRANSCRIPT_PROJECT" in message.replies[0]
 
 
 def test_subscribed_reports_a_corrupt_watch_list_instead_of_crashing(tmp_path: Path) -> None:
@@ -165,7 +186,7 @@ def test_subscribed_reports_a_corrupt_watch_list_instead_of_crashing(tmp_path: P
 
     asyncio.run(cmd_subscribed(FakeUpdate(message), FakeContext(config)))  # type: ignore[arg-type]
 
-    assert "Couldn't read the channel list" in message.replies[0]
+    assert "Couldn't read the list of watched channels" in message.replies[0]
 
 
 def test_subscribed_survives_an_unusable_project_list(
@@ -199,7 +220,7 @@ def test_subscribe_without_arguments_explains_itself(tmp_path: Path) -> None:
 
     asyncio.run(cmd_subscribe(FakeUpdate(message), context))  # type: ignore[arg-type]
 
-    assert "Usage: /subscribe" in message.replies[0]
+    assert "/subscribe @veritasium" in message.replies[0]
 
 
 def test_subscribe_rejects_a_link_that_isnt_youtube(tmp_path: Path) -> None:
@@ -209,6 +230,26 @@ def test_subscribe_rejects_a_link_that_isnt_youtube(tmp_path: Path) -> None:
     asyncio.run(cmd_subscribe(FakeUpdate(message), context))  # type: ignore[arg-type]
 
     assert "doesn't look like a YouTube link" in message.replies[-1]
+
+
+def test_subscribe_reports_a_project_list_network_failure(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    config = _config(tmp_path)
+    _patch_resolution(monkeypatch, ResolvedChannel("@Cava", "José Luis Cava", "UC1"))
+    message = FakeMessage()
+    context = FakeContext(config, args=["https://www.youtube.com/watch?v=abc"])
+
+    def fail() -> list[dict]:
+        raise RequestException("Claude unavailable")
+
+    monkeypatch.setattr(context.bot_data["claude_client"], "list_projects", fail)
+
+    asyncio.run(cmd_subscribe(FakeUpdate(message), context))  # type: ignore[arg-type]
+
+    assert "Couldn't reach Claude to load your projects" in message.replies[-1]
+    assert "subscribe_7" not in context.user_data
 
 
 def _patch_resolution(monkeypatch: pytest.MonkeyPatch, resolved: ResolvedChannel) -> None:
@@ -226,7 +267,7 @@ def test_subscribe_offers_a_project_picker_with_a_default_row(
 
     asyncio.run(cmd_subscribe(FakeUpdate(message), context))  # type: ignore[arg-type]
 
-    assert "Found José Luis Cava (@Cava)" in message.replies[-1]
+    assert "José Luis Cava" in message.replies[-1]
     assert _callbacks(message.markups[-1]) == [
         "sub:default:42",
         "sub:inv-uuid:42",
@@ -247,7 +288,7 @@ def test_subscribe_recognises_a_channel_already_watched(
 
     asyncio.run(cmd_subscribe(FakeUpdate(message), context))  # type: ignore[arg-type]
 
-    assert "Already watching Cava (@Cava)" in message.replies[-1]
+    assert "Already watching <b>Cava</b> (@Cava)" in message.replies[-1]
     assert message.markups[-1] is None  # no picker; nothing to choose
 
 
@@ -270,8 +311,8 @@ def test_selecting_a_project_writes_the_channel(tmp_path: Path) -> None:
     assert json.loads(config.poller.channels_path.read_text()) == [
         {"handle": "@Rosa", "name": "Dr. La Rosa", "channel_id": "UC2", "project": "gym-uuid"},
     ]
-    assert "✅ Watching Dr. La Rosa (@Rosa)." in query.edits[-1]
-    assert "New videos go to Exercise" in query.edits[-1]
+    assert "✅ Watching <b>Dr. La Rosa</b> (@Rosa)." in query.edits[-1]
+    assert "New videos go to <b>Exercise</b>" in query.edits[-1]
     assert "within 30 min" in query.edits[-1]
 
 
@@ -283,7 +324,7 @@ def test_selecting_the_default_inherits_the_global_project(tmp_path: Path) -> No
     assert json.loads(config.poller.channels_path.read_text()) == [
         {"handle": "@Rosa", "name": "Dr. La Rosa", "channel_id": "UC2"},
     ]
-    assert "New videos go to Investments" in query.edits[-1]
+    assert "New videos go to <b>Investments</b>" in query.edits[-1]
 
 
 def test_selection_appends_to_an_existing_watch_list(tmp_path: Path) -> None:
@@ -305,8 +346,8 @@ def test_selecting_a_project_still_warns_when_auto_upload_is_off(tmp_path: Path)
 
     query = _select(config, "gym-uuid", ResolvedChannel("@Rosa", "Dr. La Rosa", "UC2"))
 
-    assert "✅ Watching Dr. La Rosa (@Rosa)." in query.edits[-1]
-    assert "AUTO_TRANSCRIPT_PROJECT is not set" in query.edits[-1]
+    assert "✅ Watching <b>Dr. La Rosa</b> (@Rosa)." in query.edits[-1]
+    assert "AUTO_TRANSCRIPT_PROJECT" in query.edits[-1]
 
 
 def test_selection_after_a_restart_asks_for_the_command_again(tmp_path: Path) -> None:
@@ -316,7 +357,7 @@ def test_selection_after_a_restart_asks_for_the_command_again(tmp_path: Path) ->
 
     asyncio.run(handle_subscribe_selection(FakeUpdate(query=query), context))  # type: ignore[arg-type]
 
-    assert "Session expired" in query.edits[-1]
+    assert "older message" in query.edits[-1]
     assert not (tmp_path / "channels.json").exists()
 
 
@@ -335,6 +376,24 @@ def test_more_reveals_every_project_without_writing_anything(tmp_path: Path) -> 
     assert _callbacks(query.markups[-1]) == ["sub:default:42", "sub:inv-uuid:42", "sub:gym-uuid:42"]
     assert not config.poller.channels_path.exists()
     assert "subscribe_42" in context.user_data  # still waiting for a real choice
+
+
+def test_more_reports_a_project_list_network_failure(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    query = FakeQuery("sub:more:42")
+    context = FakeContext(_config(tmp_path))
+
+    def fail() -> list[dict]:
+        raise RequestException("Claude unavailable")
+
+    monkeypatch.setattr(context.bot_data["claude_client"], "list_projects", fail)
+
+    asyncio.run(handle_subscribe_selection(FakeUpdate(query=query), context))  # type: ignore[arg-type]
+
+    assert "Couldn't reach Claude to load your projects" in query.edits[-1]
+    assert query.markups == []
 
 
 if __name__ == "__main__":

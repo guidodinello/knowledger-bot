@@ -9,7 +9,10 @@ it as a doc into ``config.poller.auto_transcript_project`` (or a channel's own
 """
 
 import asyncio
+import fcntl
 import re
+from collections.abc import Iterator
+from contextlib import contextmanager
 from dataclasses import asdict, dataclass, field, replace
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
@@ -24,9 +27,16 @@ from .config import Config, ProxyConfig
 from .history import UploadRecord, record_upload
 from .logger import get_logger
 from .notify import notify
-from .persistence import CorruptDataError, PersistenceError, atomic_write_json, load_json
+from .persistence import (
+    CorruptDataError,
+    PersistenceError,
+    atomic_write_json,
+    atomic_write_json_if_exists,
+    load_json,
+)
 from .queue import Queue, build_auth_fallback_entry
 from .queue_processor import MAX_UPLOAD_ATTEMPTS
+from .telegram_format import bold, code, subject
 from .transcript import TranscriptTransportError, TranscriptUnavailable, fetch_transcript
 from .upload_service import (
     AlreadyExists,
@@ -45,6 +55,21 @@ YT_NS = "{http://www.youtube.com/xml/schemas/2015}"
 
 UPLOAD_DELAY = timedelta(hours=24)  # wait for YouTube's polished captions to replace the draft
 GIVE_UP_AFTER = timedelta(hours=72)  # measured from first detection, not publish time
+
+
+def _video_subject(video: "PendingVideo") -> str:
+    """Every notification about a pending video names it the same way."""
+    return subject(video.title, video.channel_name, video.video_id)
+
+
+def _fmt_days(delta: timedelta) -> str:
+    """Render a give-up/delay window for user-facing copy. Derived from the constant
+    rather than restated as a literal, so the copy can't drift when it changes."""
+    days = round(delta.total_seconds() / 86400)
+    if days < 1:
+        hours = round(delta.total_seconds() / 3600)
+        return f"{hours} hours"
+    return "a day" if days == 1 else f"{days} days"
 # Priority order: a channel page carries its OWN id as "externalId" / the canonical
 # /channel/ link, but also embeds OTHER channels' "channelId" (recommendations, etc.) —
 # so match the authoritative fields first and fall back to a bare channelId only last.
@@ -129,15 +154,37 @@ def load_channels(path: Path) -> list[Channel]:
         raise CorruptDataError(path, f"malformed channel entry: {e}") from e
 
 
-def save_channels(path: Path, channels: list[Channel]) -> None:
-    # Convert to dicts and remove project field if None to avoid writing "project": null
+def _channel_dicts(channels: list[Channel]) -> list[dict[str, str | None]]:
+    """Serialize channels, omitting a null project so absence means inherit default."""
     channel_dicts = []
-    for c in channels:
-        d = asdict(c)
-        if d["project"] is None:
-            del d["project"]
-        channel_dicts.append(d)
-    atomic_write_json(path, channel_dicts)
+    for channel in channels:
+        data = asdict(channel)
+        if data["project"] is None:
+            del data["project"]
+        channel_dicts.append(data)
+    return channel_dicts
+
+
+def save_channels(path: Path, channels: list[Channel]) -> None:
+    atomic_write_json(path, _channel_dicts(channels))
+
+
+def _save_existing_channels(path: Path, channels: list[Channel]) -> bool:
+    """Persist only if channels.json still exists at the atomic replacement point."""
+    return atomic_write_json_if_exists(path, _channel_dicts(channels))
+
+
+@contextmanager
+def channels_file_lock(path: Path) -> Iterator[None]:
+    """Serialize channels.json read-modify-write transactions across worker threads."""
+    lock_path = path.with_name(f"{path.name}.lock")
+    lock_path.parent.mkdir(parents=True, exist_ok=True)
+    with lock_path.open("a") as lock_file:
+        fcntl.flock(lock_file.fileno(), fcntl.LOCK_EX)
+        try:
+            yield
+        finally:
+            fcntl.flock(lock_file.fileno(), fcntl.LOCK_UN)
 
 
 def _proxies(proxy: ProxyConfig | None) -> dict[str, str] | None:
@@ -215,9 +262,10 @@ def _resolve_missing_ids(channels: list[Channel], path: Path, proxy: ProxyConfig
     """Backfill any null channel_id from its handle and persist the result.
 
     Resolution is network-bound and takes seconds per channel, during which `/subscribe`
-    can append to the same file. Writing `channels` back as-is would drop that append, so
-    the file is re-read immediately before saving and only the newly resolved ids are
-    applied on top of it — the caller's list still gets the ids either way."""
+    can append to the same file. The final re-read and save share a filesystem lock with
+    that command's whole mutation transaction, so neither writer can drop the other's
+    changes. If the file disappeared during resolution, it is deliberately not recreated;
+    the caller's in-memory list still gets the resolved ids either way."""
     resolved: dict[str, str] = {}
     for ch in channels:
         if ch.channel_id:
@@ -229,11 +277,16 @@ def _resolve_missing_ids(channels: list[Channel], path: Path, proxy: ProxyConfig
             logger.info("Resolved %s -> %s", ch.handle, cid)
     if not resolved:
         return
-    latest = load_channels(path)
-    for ch in latest:
-        if not ch.channel_id:
-            ch.channel_id = resolved.get(ch.handle.lower())
-    save_channels(path, latest)
+    with channels_file_lock(path):
+        latest = load_channels(path)
+        for ch in latest:
+            if not ch.channel_id:
+                ch.channel_id = resolved.get(ch.handle.lower())
+        if not _save_existing_channels(path, latest):
+            logger.warning(
+                "Channels file %s disappeared during id resolution; not recreating it",
+                path,
+            )
 
 
 def _baseline_seed(
@@ -382,6 +435,7 @@ class TranscriptPoller:
     async def _process_video(
         self,
         project_id: str,
+        project_name: str,
         video: PendingVideo,
         now: datetime,
     ) -> PendingVideo | None:
@@ -406,7 +460,9 @@ class TranscriptPoller:
                 await notify(
                     self._app,
                     self._config,
-                    f"⚠️ No captions for “{video.title}” — gave up.",
+                    _video_subject(video)
+                    + "\n\nStill no captions after "
+                    f"{_fmt_days(GIVE_UP_AFTER)}, so I've stopped waiting for them.",
                 )
                 return None
             logger.info("Transcript not ready for %s; will retry", video.video_id)
@@ -430,9 +486,14 @@ class TranscriptPoller:
                         video_title=video.title,
                         channel_name=video.channel_name,
                         uploaded_at=datetime.now(UTC).isoformat(),
+                        video_id=video.video_id,
                     ),
                 )
-                await notify(self._app, self._config, f"✅ Auto-uploaded “{file_name}”")
+                await notify(
+                    self._app,
+                    self._config,
+                    f"✅ Auto-saved to {bold(project_name)}\n{_video_subject(video)}",
+                )
                 return None
             case AlreadyExists():
                 logger.info("Doc already exists, skipping: %s", file_name)
@@ -450,7 +511,9 @@ class TranscriptPoller:
                 await notify(
                     self._app,
                     self._config,
-                    f"Token expired — “{file_name}” queued. Run /refresh.",
+                    f"⏳ Waiting on a valid token\n{_video_subject(video)}\n\n"
+                    "The transcript is queued. Update your Claude session token, "
+                    "then run /refresh.",
                 )
                 return video  # keep pending until we confirm the upload landed
             case RetryPending(step=step, error=error):
@@ -469,8 +532,10 @@ class TranscriptPoller:
                     await notify(
                         self._app,
                         self._config,
-                        f"🛑 Upload stuck for “{file_name}” while {step} — failed {attempts}x in "
-                        "a row. Check logs; it will keep retrying.",
+                        f"🛑 Stuck after {attempts} attempts — the upload to "
+                        f"{bold(project_name)} keeps failing.\n{_video_subject(video)}\n\n"
+                        "It stays queued and keeps retrying; check the logs if it "
+                        "doesn't clear.",
                     )
                 return replace(video, upload_attempts=attempts)
 
@@ -537,8 +602,10 @@ class TranscriptPoller:
                 await notify(
                     self._app,
                     self._config,
-                    "⚠️ Claude session token expired — poller is paused. "
-                    "Update the token (`POST /update-token`) to resume.",
+                    "⚠️ Auto-upload is paused: your Claude session token has expired.\n\n"
+                    f"Send a new one to {code('POST /update-token')} and I'll resume "
+                    "on the next check. Nothing is lost in the meantime — new videos "
+                    "stay queued (see /inqueue).",
                 )
             return
         if self._state.auth_error_notified:
@@ -546,7 +613,7 @@ class TranscriptPoller:
             await notify(
                 self._app,
                 self._config,
-                "✅ Claude session token restored — poller resumed.",
+                "✅ Token accepted — auto-upload has resumed.",
             )
 
         # 3. Process every pending video whose publish time is at least UPLOAD_DELAY
@@ -571,7 +638,7 @@ class TranscriptPoller:
                 # don't drop it; _resolve_project already logged the error.
                 settled.append(video)
                 continue
-            result = await self._process_video(project_id, video, now)
+            result = await self._process_video(project_id, project_name, video, now)
             if result is not None:
                 settled.append(result)
             self._state.pending = settled + original_pending[i + 1 :]

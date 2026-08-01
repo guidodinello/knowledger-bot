@@ -58,7 +58,7 @@ def test_transport_error_never_ages_into_give_up_even_past_the_window(tmp_path) 
     poller = _poller(tmp_path)  # client unused: fetch fails before any client call
 
     with patch("knowledger.poller.fetch_transcript", side_effect=TranscriptTransportError("v")):
-        result = asyncio.run(poller._process_video("proj", video, datetime.now(UTC)))
+        result = asyncio.run(poller._process_video("proj", "Proj", video, datetime.now(UTC)))
 
     assert result is not None  # kept pending, not given up on
     assert result.video_id == "v"
@@ -70,7 +70,7 @@ def test_unavailable_gives_up_after_window(tmp_path) -> None:
     poller = _poller(tmp_path)
 
     with patch("knowledger.poller.fetch_transcript", side_effect=TranscriptUnavailable("v")):
-        result = asyncio.run(poller._process_video("proj", video, datetime.now(UTC)))
+        result = asyncio.run(poller._process_video("proj", "Proj", video, datetime.now(UTC)))
 
     assert result is None  # given up
 
@@ -81,7 +81,7 @@ def test_unavailable_within_window_stays_pending(tmp_path) -> None:
     poller = _poller(tmp_path)
 
     with patch("knowledger.poller.fetch_transcript", side_effect=TranscriptUnavailable("v")):
-        result = asyncio.run(poller._process_video("proj", video, datetime.now(UTC)))
+        result = asyncio.run(poller._process_video("proj", "Proj", video, datetime.now(UTC)))
 
     assert result is not None
     assert result.video_id == "v"
