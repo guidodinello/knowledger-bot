@@ -13,6 +13,7 @@ from dataclasses import dataclass
 from pathlib import Path
 
 from curl_cffi.requests.exceptions import RequestException
+from defusedxml.ElementTree import ParseError
 
 from .config import ProxyConfig
 from .logger import get_logger
@@ -53,7 +54,7 @@ def _name_from_feed(channel_id: str, proxy: ProxyConfig | None) -> str | None:
     display name for a channel we reached by URL rather than through a video."""
     try:
         videos = fetch_feed(channel_id, proxy)
-    except Exception:
+    except (RequestException, ParseError):
         logger.warning("Could not read %s's feed while subscribing", channel_id, exc_info=True)
         return None
     return next((v.channel_name for v in videos if v.channel_name), None)

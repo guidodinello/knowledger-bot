@@ -23,7 +23,7 @@ from .history import UploadRecord, record_upload
 from .logger import get_logger
 from .pending_transcripts import PendingTranscript, PendingTranscriptStore
 from .persistence import PersistenceError
-from .poller import PollerState, load_channels
+from .poller import UPLOAD_DELAY, PollerState, load_channels
 from .queue import Queue, QueueEntry
 from .queue_processor import DrainResult, QueueProcessor
 from .subscriptions import (
@@ -379,7 +379,7 @@ async def _project_names(context: CustomContext) -> dict[str, str]:
     projects: list[Project] | None
     try:
         projects = await asyncio.to_thread(context.bot_data["claude_client"].list_projects)
-    except Exception:
+    except (AuthError, RequestException):
         logger.warning("Could not load the live project list for display", exc_info=True)
         try:
             projects = load_persisted_projects(context.bot_data["config"].storage.data_dir)
@@ -389,9 +389,15 @@ async def _project_names(context: CustomContext) -> dict[str, str]:
     return {p["uuid"]: p["name"] for p in projects or []}
 
 
-def _fmt_interval(seconds: int) -> str:
+def _fmt_interval(seconds: float) -> str:
     minutes = max(1, round(seconds / 60))
     return f"{minutes // 60}h" if minutes >= 60 and minutes % 60 == 0 else f"{minutes} min"
+
+
+def _fmt_upload_delay() -> str:
+    """The poller's UPLOAD_DELAY is the authoritative definition — never restate it as a
+    literal in user-facing copy, or the bot starts lying when the delay changes."""
+    return _fmt_interval(UPLOAD_DELAY.total_seconds())
 
 
 @_require_auth
@@ -430,7 +436,7 @@ async def cmd_subscribed(update: Update, context: CustomContext, user: User) -> 
     if default:
         lines.append(
             f"Checked every {_fmt_interval(config.poller.poll_interval)}; "
-            "transcripts upload 24h after a video is published.",
+            f"transcripts upload {_fmt_upload_delay()} after a video is published.",
         )
     else:
         lines.append("⚠️ AUTO_TRANSCRIPT_PROJECT is not set — auto-upload is off.")
@@ -542,7 +548,10 @@ async def handle_subscribe_selection(update: Update, context: CustomContext, use
         try:
             projects = await asyncio.to_thread(context.bot_data["claude_client"].list_projects)
         except AuthError as e:
-            await query.answer(str(e)[:200])
+            # Not query.answer(): the handler already answered above, and Telegram
+            # delivers only the first answer — a second one is silently dropped, so a
+            # dead-token tap would appear to do nothing. Report in the message instead.
+            await query.edit_message_text(f"Auth error: {e}")
             return
         await query.edit_message_reply_markup(
             reply_markup=_subscribe_keyboard(projects, msg_id_str, config, show_all=True),
@@ -591,7 +600,7 @@ async def handle_subscribe_selection(update: Update, context: CustomContext, use
         lines.append(
             f"New videos go to {_project_label(project or default, names)}, "
             f"picked up within {_fmt_interval(config.poller.poll_interval)} and uploaded "
-            "24h after publication.",
+            f"{_fmt_upload_delay()} after publication.",
         )
     await query.edit_message_text("\n".join(lines))
 

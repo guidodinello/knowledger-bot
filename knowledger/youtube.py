@@ -53,10 +53,13 @@ class VideoMetadata:
     channel_url: str | None = None
 
 
+_YOUTUBE_HOSTS = ("www.youtube.com", "youtube.com", "m.youtube.com")
+
+
 def extract_video_id(url: str) -> str | None:
     parsed = urlparse(url)
 
-    if parsed.hostname in ("www.youtube.com", "youtube.com"):
+    if parsed.hostname in _YOUTUBE_HOSTS:
         if parsed.path == "/watch":
             qs = parse_qs(parsed.query)
             ids = qs.get("v")
@@ -69,9 +72,6 @@ def extract_video_id(url: str) -> str | None:
         return vid or None
 
     return None
-
-
-_YOUTUBE_HOSTS = ("www.youtube.com", "youtube.com", "m.youtube.com")
 
 
 def extract_channel_handle(url: str) -> str | None:

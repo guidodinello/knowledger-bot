@@ -8,6 +8,7 @@ import pytest
 from telegram import InlineKeyboardMarkup
 
 from knowledger.bot import cmd_subscribe, cmd_subscribed, handle_subscribe_selection
+from knowledger.claude_client import AuthError
 from knowledger.config import (
     ClaudeSettings,
     Config,
@@ -179,7 +180,7 @@ def test_subscribed_survives_an_unusable_project_list(
     monkeypatch.setattr(
         context.bot_data["claude_client"],
         "list_projects",
-        lambda: (_ for _ in ()).throw(RuntimeError("no token")),
+        lambda: (_ for _ in ()).throw(AuthError("no token")),
     )
     message = FakeMessage()
 

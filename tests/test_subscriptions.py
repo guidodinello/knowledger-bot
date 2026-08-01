@@ -2,6 +2,7 @@ import json
 from pathlib import Path
 
 import pytest
+from curl_cffi.requests.exceptions import RequestException
 
 from knowledger.poller import Channel, PendingVideo, load_channels
 from knowledger.subscriptions import (
@@ -11,7 +12,7 @@ from knowledger.subscriptions import (
     find_subscription,
     resolve_subscription,
 )
-from knowledger.youtube import VideoMetadata, extract_channel_handle
+from knowledger.youtube import VideoMetadata, extract_channel_handle, extract_video_id
 
 
 @pytest.mark.parametrize(
@@ -36,6 +37,24 @@ from knowledger.youtube import VideoMetadata, extract_channel_handle
 )
 def test_extract_channel_handle(text: str, expected: str | None) -> None:
     assert extract_channel_handle(text) == expected
+
+
+@pytest.mark.parametrize(
+    ("text", "expected"),
+    [
+        ("https://www.youtube.com/watch?v=abc123", "abc123"),
+        ("https://youtube.com/watch?v=abc123", "abc123"),
+        # Mobile share links: what the YouTube app puts on the clipboard on a phone,
+        # so /subscribe and the upload flow have to recognise them as video URLs.
+        ("https://m.youtube.com/watch?v=abc123", "abc123"),
+        ("https://m.youtube.com/shorts/abc123", "abc123"),
+        ("https://youtu.be/abc123", "abc123"),
+        # Channel references are not video URLs.
+        ("https://m.youtube.com/@Foo", None),
+    ],
+)
+def test_extract_video_id_accepts_every_youtube_host(text: str, expected: str | None) -> None:
+    assert extract_video_id(text) == expected
 
 
 def test_resolve_subscription_from_video_url(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -86,7 +105,7 @@ def test_resolve_subscription_falls_back_to_the_handle_when_the_feed_is_unreadab
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     def boom(channel_id: str, proxy: object) -> list[PendingVideo]:
-        raise RuntimeError("feed down")
+        raise RequestException("feed down")
 
     monkeypatch.setattr("knowledger.subscriptions.resolve_channel_id", lambda h, p: "UCabc")
     monkeypatch.setattr("knowledger.subscriptions.fetch_feed", boom)

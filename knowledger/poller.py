@@ -13,7 +13,6 @@ import re
 from dataclasses import asdict, dataclass, field, replace
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
-from typing import cast
 
 from curl_cffi import requests
 from curl_cffi.requests.exceptions import RequestException
@@ -213,34 +212,59 @@ def fetch_feed(channel_id: str, proxy: ProxyConfig | None = None) -> list[Pendin
 
 
 def _resolve_missing_ids(channels: list[Channel], path: Path, proxy: ProxyConfig | None) -> None:
-    """Backfill any null channel_id from its handle and persist the result."""
-    changed = False
+    """Backfill any null channel_id from its handle and persist the result.
+
+    Resolution is network-bound and takes seconds per channel, during which `/subscribe`
+    can append to the same file. Writing `channels` back as-is would drop that append, so
+    the file is re-read immediately before saving and only the newly resolved ids are
+    applied on top of it — the caller's list still gets the ids either way."""
+    resolved: dict[str, str] = {}
     for ch in channels:
         if ch.channel_id:
             continue
         cid = resolve_channel_id(ch.handle, proxy)
         if cid:
             ch.channel_id = cid
-            changed = True
+            resolved[ch.handle.lower()] = cid
             logger.info("Resolved %s -> %s", ch.handle, cid)
-    if changed:
-        save_channels(path, channels)
+    if not resolved:
+        return
+    latest = load_channels(path)
+    for ch in latest:
+        if not ch.channel_id:
+            ch.channel_id = resolved.get(ch.handle.lower())
+    save_channels(path, latest)
 
 
-def _baseline_seed(channels: list[Channel], state: PollerState, proxy: ProxyConfig | None) -> None:
+def _baseline_seed(
+    channels: list[Channel],
+    state: PollerState,
+    proxy: ProxyConfig | None,
+) -> set[str]:
     """Mark every current feed video of the given channels as seen WITHOUT enqueueing it,
     so the poller only ever processes videos published after a channel starts being
     watched (no back-catalogue storm). Called both on first run (all channels) and
-    whenever a channel is newly added to channels.json (just that channel)."""
+    whenever a channel is newly added to channels.json (just that channel).
+
+    Returns the ids of the channels whose feed was actually read. A channel whose fetch
+    failed is deliberately left out: marking it seeded anyway would make the next tick
+    treat its whole back catalogue as new — the exact flood this seeding prevents — and
+    YouTube blocking a datacenter IP makes that failure routine, not exceptional."""
+    seeded: set[str] = set()
     for ch in channels:
         if not ch.channel_id:
             continue
         try:
-            for video in fetch_feed(ch.channel_id, proxy):
-                state.seen.add(video.video_id)
+            videos = fetch_feed(ch.channel_id, proxy)
         except Exception:
             logger.warning("Baseline fetch failed for %s", ch.handle, exc_info=True)
-    logger.info("Baseline-seeded %d existing videos", len(state.seen))
+            continue
+        # An empty feed is a successful read (a channel with no videos yet) — seeded.
+        for video in videos:
+            state.seen.add(video.video_id)
+        seeded.add(ch.channel_id)
+    logger.info("Baseline-seeded %d of %d channels", len(seeded), len(channels))
+    return seeded
 
 
 async def sync_channels(
@@ -271,12 +295,22 @@ async def sync_channels(
 
     await asyncio.to_thread(_resolve_missing_ids, channels, path, proxy)
 
+    # Drop seeded-markers for channels no longer watched. Removing a channel by hand and
+    # re-adding it later is the documented flow (there is no /unsubscribe), and a stale
+    # marker would skip seeding on the way back in — uploading the whole gap period.
+    watched = {ch.channel_id for ch in channels if ch.channel_id}
+    pruned = state.baseline_seeded - watched
+    if pruned:
+        logger.info("Dropping baseline markers for %d unwatched channels", len(pruned))
+        state.baseline_seeded &= watched
+
     unseeded = [
         ch for ch in channels if ch.channel_id and ch.channel_id not in state.baseline_seeded
     ]
     if unseeded:
-        await asyncio.to_thread(_baseline_seed, unseeded, state, proxy)
-        state.baseline_seeded.update(cast(str, ch.channel_id) for ch in unseeded)
+        state.baseline_seeded |= await asyncio.to_thread(_baseline_seed, unseeded, state, proxy)
+    # A prune alone changes state without producing anything to seed — still persist it.
+    if unseeded or pruned:
         state.save()
     return channels
 
@@ -451,9 +485,14 @@ class TranscriptPoller:
             self._channels,
         )
 
-        # 1. Detect new videos across all channels.
+        # 1. Detect new videos across all channels. A channel whose baseline seed failed
+        # above is skipped: its feed has never been read, so every entry would look new
+        # and its back catalogue would be enqueued wholesale. Seeding is retried next tick.
         for ch in self._channels:
             if not ch.channel_id:
+                continue
+            if ch.channel_id not in self._state.baseline_seeded:
+                logger.info("Skipping %s until its baseline seed succeeds", ch.handle)
                 continue
             try:
                 videos = await asyncio.to_thread(

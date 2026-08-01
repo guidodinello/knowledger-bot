@@ -7,6 +7,7 @@ from typing import Any, cast
 from unittest.mock import AsyncMock, patch
 
 import pytest
+from curl_cffi.requests.exceptions import RequestException
 from telegram.ext import Application
 
 from knowledger.claude_client import AuthError, ClaudeClient
@@ -25,6 +26,8 @@ from knowledger.poller import (
     PendingVideo,
     PollerState,
     TranscriptPoller,
+    _resolve_missing_ids,
+    load_channels,
     run_poller,
     save_channels,
 )
@@ -342,6 +345,107 @@ def test_tick_uploads_a_pending_video_whose_channel_was_unsubscribed(tmp_path: P
 
     assert state.pending == []
     assert [pid for pid, _ in client.uploads] == ["default-id"]
+
+
+# --- Part C: baseline seeding is not credited unless the feed was actually read -------
+
+
+def test_tick_does_not_mark_a_channel_seeded_when_its_baseline_fetch_fails(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A failed baseline fetch must not be recorded as seeded, and the channel must not
+    be detected from in the same tick — otherwise its whole back catalogue is enqueued."""
+    state = PollerState(path=tmp_path / "state.json")
+    channels = [Channel(handle="@a", name="A", channel_id="chan-a")]
+
+    def failing_feed(channel_id: str, proxy=None) -> list[PendingVideo]:
+        raise RequestException("YouTube blocked us")
+
+    monkeypatch.setattr("knowledger.poller.fetch_feed", failing_feed)
+    poller = _poller(tmp_path, FakeClaudeClient([]), channels, state)
+
+    asyncio.run(poller._tick())
+
+    assert state.baseline_seeded == set()
+    assert state.pending == []
+
+
+def test_tick_skips_detection_for_a_channel_whose_seed_failed_but_whose_feed_then_works(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The flood window: seeding fails, then the very next fetch in the same tick
+    succeeds. Every entry would look new, so detection has to skip the channel."""
+    state = PollerState(path=tmp_path / "state.json")
+    channels = [Channel(handle="@a", name="A", channel_id="chan-a")]
+    calls = {"n": 0}
+
+    def flaky_feed(channel_id: str, proxy=None) -> list[PendingVideo]:
+        calls["n"] += 1
+        if calls["n"] == 1:  # the baseline seed
+            raise RequestException("transient block")
+        return [_feed_video(channel_id, f"back-catalogue-{i}") for i in range(5)]
+
+    monkeypatch.setattr("knowledger.poller.fetch_feed", flaky_feed)
+    poller = _poller(tmp_path, FakeClaudeClient([]), channels, state)
+
+    asyncio.run(poller._tick())
+
+    assert state.pending == []  # no back-catalogue flood
+    assert state.seen == set()
+
+
+def test_tick_reseeds_a_channel_that_was_removed_and_re_added(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Removing a channel by hand and re-adding it via /subscribe must seed it again —
+    a stale `baseline_seeded` marker would upload the whole gap period."""
+    state = PollerState(path=tmp_path / "state.json", baseline_seeded={"chan-a"})
+    monkeypatch.setattr(
+        "knowledger.poller.fetch_feed",
+        lambda channel_id, proxy=None: [_feed_video(channel_id, "gap-video")],
+    )
+    poller = _poller(tmp_path, FakeClaudeClient([]), [], state)  # @a removed by hand
+    channels_path = tmp_path / "channels.json"
+
+    asyncio.run(poller._tick())
+    assert state.baseline_seeded == set()  # stale marker pruned
+    assert PollerState.load(state.path).baseline_seeded == set()  # and persisted
+
+    save_channels(channels_path, [Channel(handle="@a", name="A", channel_id="chan-a")])
+    asyncio.run(poller._tick())
+
+    assert state.baseline_seeded == {"chan-a"}
+    assert "gap-video" in state.seen
+    assert state.pending == []  # seeded, not enqueued
+
+
+def test_resolve_missing_ids_does_not_clobber_a_concurrent_subscribe(tmp_path: Path) -> None:
+    """`_resolve_missing_ids` scrapes for seconds while /subscribe can append to the same
+    file. Writing back its stale snapshot would drop the new channel silently."""
+    channels_path = tmp_path / "channels.json"
+    channels_path.write_text(json.dumps([{"handle": "@slow", "name": "Slow", "channel_id": None}]))
+    stale = load_channels(channels_path)
+
+    def resolve_and_meanwhile_subscribe(handle: str, proxy=None) -> str:
+        # Simulates /subscribe landing while the scrape is in flight.
+        channels_path.write_text(
+            json.dumps(
+                [
+                    {"handle": "@slow", "name": "Slow", "channel_id": None},
+                    {"handle": "@new", "name": "New", "channel_id": "chan-new"},
+                ],
+            ),
+        )
+        return "chan-slow"
+
+    with patch("knowledger.poller.resolve_channel_id", resolve_and_meanwhile_subscribe):
+        _resolve_missing_ids(stale, channels_path, None)
+
+    final = {c.handle: c.channel_id for c in load_channels(channels_path)}
+    assert final == {"@slow": "chan-slow", "@new": "chan-new"}
 
 
 if __name__ == "__main__":
