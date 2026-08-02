@@ -11,7 +11,8 @@ SSH="ssh -i $SSH_KEY $HOST"
 
 # Must match the image deploy.yml builds and pushes. A bare local tag here is what let
 # `docker run knowledger` silently resurrect a stale locally-built image after a CI deploy.
-IMAGE_REPO=ghcr.io/guidodinello/knowledger
+IMAGE_OWNER="$(git remote get-url origin | sed -E 's#^(https://github\.com/|git@github\.com:)([^/]+)/.*$#\2#')"
+IMAGE_REPO="ghcr.io/$IMAGE_OWNER/knowledger"
 
 usage() {
     echo "Usage: $0 <command>"
@@ -80,13 +81,14 @@ inspect() {
 # only the fallback for when nothing is running (first provision, or after a crash+prune).
 resolve_image() {
     local running
-    running="$($SSH "docker inspect knowledger --format '{{.Config.Image}}' 2>/dev/null" || true)"
+    running="$($SSH "docker inspect knowledger --format '{{.Config.Image}}'" || true)"
     if [[ -n "$running" && "$running" == "$IMAGE_REPO":* ]]; then
         echo "$running"
         return
     fi
     # A bare `knowledger` tag lands here too: it is the stale-local-build case, and pinning
     # to origin/main is the recovery, not something to preserve.
+    git fetch origin --quiet
     echo "$IMAGE_REPO:$(git rev-parse --short origin/main)"
 }
 
@@ -151,7 +153,6 @@ case "${1:-}" in
         $SSH "docker logs -f knowledger"
         ;;
     restart)
-        $SSH "docker rm -f knowledger"
         recreate
         $SSH "docker logs --tail 20 knowledger"
         ;;
