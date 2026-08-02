@@ -5,7 +5,7 @@ description = "Telegram bot that saves YouTube transcripts to Claude project kno
 readme = "README.md"
 requires-python = ">=3.13"
 dependencies = [
-    "python-telegram-bot>=21.0",
+    "python-telegram-bot>=22.8",
     "youtube-transcript-api>=1.0.0",
     "curl-cffi>=0.7.0",
     "python-dotenv>=1.0.0",
@@ -15,7 +15,7 @@ dependencies = [
 
 [dependency-groups]
 dev = [
-    "pre-commit>=4.0.0",
+    "pre-commit>=4.6.1",
     "pytest>=8.0.0",
     "pyright>=1.1.390",
     "bandit>=1.8.0",
