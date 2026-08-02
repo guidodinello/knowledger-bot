@@ -31,6 +31,37 @@ COPY channels.json .
 RUN uv sync --frozen --no-dev && mkdir -p /app/data
 ENV DATA_DIR=/app/data
 
+# The account the runtime stage drops to. Nothing here needs root: the HTTP token endpoint
+# binds 8080, above the privileged range.
+#
+# Writes are not confined to DATA_DIR. Several paths are CWD-relative and therefore land in
+# /app itself: logs/knowledger_<date>.log and its rotations (config.py), plus channels.json
+# and the channels.json.lock beside it (poller.py). That is why the chown below covers all
+# of /app rather than DATA_DIR alone.
+#
+# The uid/gid is pinned to 1001 to match the `ubuntu` account on the deployment host,
+# because DATA_DIR is bind-mounted out of that user's home. The match is not cosmetic:
+# claude_client writes session_token.json with mode 0o600, and config._load_persisted_token
+# fails closed if it cannot be read, so a mismatched uid would crash the bot at startup
+# rather than degrade. Existing state files are root-owned from when this ran as root, so
+# deploy.sh and the CI deploy chown DATA_DIR before starting the container.
+#
+# busybox addgroup/adduser rather than groupadd/useradd — this is Alpine, not Debian.
+RUN addgroup -g 1001 appuser \
+    && adduser -D -u 1001 -G appuser -s /sbin/nologin appuser \
+    && chown -R appuser:appuser /app
+
+# Invoke the venv interpreter directly rather than through `uv run`, following docker.md's
+# direct-entrypoint guidance: it keeps uv out of the runtime path and skips its environment
+# resolution on every start.
+#
+# To be clear about what this is *not* working around: `uv run` would function fine here.
+# appuser has a real home, so its cache at ~/.cache/uv is writable. An earlier version of
+# this comment claimed uv aborts for any non-root user, which was wrong — that error came
+# from testing with `--user 1001:1001` against an image with no matching passwd entry, which
+# left HOME as / and made /.cache/uv unwritable.
+ENV PATH="/app/.venv/bin:$PATH"
+
 ARG GIT_SHA=
 ARG GIT_COMMIT_DATE=
 ENV GIT_SHA=${GIT_SHA}
@@ -40,7 +71,8 @@ ENV GIT_COMMIT_DATE=${GIT_COMMIT_DATE}
 # plus the files the runtime image deliberately omits (tests, scripts, cli). Dev deps are
 # installed at build time so the suite needs no writable cache at run time and can execute
 # as a non-root uid — necessary because the chmod-based permission tests are vacuous under
-# root, which ignores mode 0000.
+# root, which ignores mode 0000. This stage deliberately does NOT set USER: the dev sync
+# needs root at build time, and ci.yml supplies a non-root uid when it runs the suite.
 FROM base AS test
 COPY tests/ tests/
 COPY scripts/ scripts/
@@ -51,4 +83,5 @@ RUN uv sync --frozen --dev
 # --target, so the default must resolve here and never to `test`. Do not append a stage
 # after this one. ci.yml asserts the built runtime image has no pytest to catch a slip.
 FROM base AS runtime
-CMD ["uv", "run", "python", "main.py"]
+USER appuser
+CMD ["python", "main.py"]

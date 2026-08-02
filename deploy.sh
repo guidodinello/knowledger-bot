@@ -45,7 +45,19 @@ inspect() {
 }
 
 recreate() {
-    $SSH "mkdir -p \$HOME/knowledger-bot/data && cd $REMOTE_DIR && docker rm -f knowledger; docker run -d --name knowledger --restart unless-stopped --network=host --env-file .env -v \$HOME/knowledger-bot/cookies.txt:/app/cookies.txt:ro -v \$HOME/knowledger-bot/data:/app/data --log-opt max-size=10m --log-opt max-file=3 knowledger"
+    # Order matters here, in both directions.
+    #
+    # The old container is removed *first* because it runs as root (any pre-non-root
+    # image): its atomic-replace writes create fresh uid-0 state files, so chowning while
+    # it is still live re-roots whatever it touches — the exact race that putting the
+    # chown in the deploy is meant to avoid.
+    #
+    # mkdir precedes chown because chown exits 1 on a missing path, and `set -euo
+    # pipefail` (line 2) would abort the whole deploy on a host that has never been
+    # provisioned — the case mkdir -p is here for.
+    $SSH "docker rm -f knowledger 2>/dev/null || true"
+    $SSH "mkdir -p \$HOME/knowledger-bot/data && sudo chown -R 1001:1001 \$HOME/knowledger-bot/data"
+    $SSH "cd $REMOTE_DIR && docker run -d --name knowledger --restart unless-stopped --network=host --env-file .env -v \$HOME/knowledger-bot/cookies.txt:/app/cookies.txt:ro -v \$HOME/knowledger-bot/data:/app/data --log-opt max-size=10m --log-opt max-file=3 knowledger"
     echo "Waiting for bot to start..."
     $SSH "docker logs -f knowledger 2>&1 | grep -m1 'Application started'"
     echo "Bot is up."
