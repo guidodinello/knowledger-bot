@@ -1,0 +1,4 @@
+[
+  { "handle": "@ExampleChannel", "name": "Example Channel", "channel_id": "UCxxxxxxxxxxxxxxxxxxxxxx", "project": "your-project-uuid-or-name" },
+  { "handle": "@AnotherChannel", "name": "Another Channel" }
+]

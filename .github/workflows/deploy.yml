@@ -73,10 +73,11 @@ jobs:
           # remote script on the first failing command (a failed `docker pull`,
           # e.g. GHCR auth, would otherwise be swallowed and report success).
           script_stop: true
-          # The image is self-contained (channels.json is baked in), so the VPS
-          # needs no git checkout — only the persistent host files: .env,
-          # cookies.txt, and data/ (poller state). Those are managed out-of-band
-          # via `./deploy.sh env` / `./deploy.sh cookies`, never through CI.
+          # The image carries no deployment data at all, so the VPS needs no git
+          # checkout — only the persistent host files: .env, cookies.txt, and
+          # data/ (poller state, including channels.json). Those are managed
+          # out-of-band via `./deploy.sh env` / `./deploy.sh cookies` /
+          # `./deploy.sh channels`, never through CI.
           script: |
             IMAGE=ghcr.io/${{ github.repository_owner }}/knowledger:${{ needs.build.outputs.short_sha }}
             cd /home/ubuntu/knowledger-bot

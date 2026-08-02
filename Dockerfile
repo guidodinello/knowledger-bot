@@ -22,7 +22,6 @@ COPY --from=ghcr.io/astral-sh/uv:0.11.29 /uv /usr/local/bin/uv
 COPY pyproject.toml uv.lock README.md ./
 COPY knowledger/ knowledger/
 COPY main.py .
-COPY channels.json .
 
 # Persistent state (poller_state.json, petition_queue.json) lives here, bind-mounted to a
 # host dir at runtime (see deploy.sh). Set as an image ENV rather than in the secrets
@@ -34,10 +33,9 @@ ENV DATA_DIR=/app/data
 # The account the runtime stage drops to. Nothing here needs root: the HTTP token endpoint
 # binds 8080, above the privileged range.
 #
-# Writes are not confined to DATA_DIR. Several paths are CWD-relative and therefore land in
-# /app itself: logs/knowledger_<date>.log and its rotations (config.py), plus channels.json
-# and the channels.json.lock beside it (poller.py). That is why the chown below covers all
-# of /app rather than DATA_DIR alone.
+# Writes are not confined to DATA_DIR: logs/knowledger_<date>.log and its rotations
+# (config.py) are CWD-relative and land in /app itself. That is why the chown below covers
+# all of /app rather than DATA_DIR alone.
 #
 # The uid/gid is pinned to 1001 to match the `ubuntu` account on the deployment host,
 # because DATA_DIR is bind-mounted out of that user's home. The match is not cosmetic:

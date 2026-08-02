@@ -11,3 +11,5 @@
   → refined: [features/version-command.md](../features/version-command.md)
 - add /subscribed command to show the channels we are subscribed to for the auto upload. same with a /subscribe command to add a new channel, maybe using an url to a video of the channel
   → refined: [features/subscribe-commands.md](../features/subscribe-commands.md)
+- remove channels.json from git: it's deployment data (personal channels + Claude project UUIDs), writable at runtime like the other gitignored state files. Ship channels.example.json, gitignore the real one, build the image with an empty file, and mount a host copy on the VPS (like cookies.txt) with a `deploy.sh channels` sync — also fixes /subscribe edits being wiped on every redeploy
+  → refined: [features/channels-json-out-of-git.md](../features/channels-json-out-of-git.md)

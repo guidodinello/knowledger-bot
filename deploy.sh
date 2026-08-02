@@ -11,12 +11,13 @@ SSH="ssh -i $SSH_KEY $HOST"
 
 usage() {
     echo "Usage: $0 <command>"
-    echo "  env     — sync .env.oracle to server and restart container"
-    echo "  cookies — sync cookies.txt to server and restart container"
-    echo "  update  — git pull on server, rebuild image, recreate container"
-    echo "  logs    — tail container logs"
-    echo "  restart — restart container"
-    echo "  inspect — print the retry queue and channel/video poller state"
+    echo "  env      — sync .env.oracle to server and restart container"
+    echo "  cookies  — sync cookies.txt to server and restart container"
+    echo "  channels — sync channels.json to server's data/ dir and restart container"
+    echo "  update   — git pull on server, rebuild image, recreate container"
+    echo "  logs     — tail container logs"
+    echo "  restart  — restart container"
+    echo "  inspect  — print the retry queue, channel/video poller state, and watch list"
 }
 
 sync_env() {
@@ -25,6 +26,10 @@ sync_env() {
 
 sync_cookies() {
     rsync -e "ssh -i $SSH_KEY" cookies.txt "$HOST:$REMOTE_DIR/cookies.txt"
+}
+
+sync_channels() {
+    rsync -e "ssh -i $SSH_KEY" channels.json "$HOST:$REMOTE_DIR/data/channels.json"
 }
 
 _print_remote_json() {
@@ -42,6 +47,8 @@ inspect() {
     _print_remote_json "petition_queue.json (retry/upload queue)" "$REMOTE_DIR/data/petition_queue.json"
     echo
     _print_remote_json "poller_state.json (seen + pending videos)" "$REMOTE_DIR/data/poller_state.json"
+    echo
+    _print_remote_json "channels.json (watch list)" "$REMOTE_DIR/data/channels.json"
 }
 
 recreate() {
@@ -74,6 +81,13 @@ case "${1:-}" in
     cookies)
         echo "Syncing cookies.txt..."
         sync_cookies
+        echo "Recreating container..."
+        recreate
+        $SSH "docker logs --tail 20 knowledger"
+        ;;
+    channels)
+        echo "Syncing channels.json..."
+        sync_channels
         echo "Recreating container..."
         recreate
         $SSH "docker logs --tail 20 knowledger"

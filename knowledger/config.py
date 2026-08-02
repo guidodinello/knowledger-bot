@@ -239,7 +239,7 @@ def load_config() -> Config:
         ),
         poller=PollerSettings(
             auto_transcript_project=os.getenv("AUTO_TRANSCRIPT_PROJECT") or None,
-            channels_path=Path(os.getenv("CHANNELS_PATH", "channels.json")),
+            channels_path=data_dir / "channels.json",
             poll_interval=poll_interval,
         ),
         storage=StorageSettings(data_dir=data_dir),

@@ -22,6 +22,7 @@ cookies.txt
 poller_state.json
 petition_queue.json
 upload_history.json
+channels.json
 /data/
 *.tmp
 
