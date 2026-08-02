@@ -42,9 +42,15 @@ jobs:
 
       # `--auto` queues the merge behind the required CI check rather than merging
       # immediately, so the branch ruleset still decides whether it lands.
+      #
+      # Gated on the mint step's outcome rather than on APP_ID. `outcome == 'success'`
+      # subsumes the APP_ID check (an unset id leaves this 'skipped') and states the real
+      # precondition: a token was actually issued. A plain `if:` is ANDed with the implicit
+      # success(), so a failed mint already skips this step — verified on a scratch workflow,
+      # not assumed — but naming the dependency means it no longer rests on that subtlety.
       - name: Auto-merge patch and minor updates
         if: |
-          env.APP_ID != '' &&
+          steps.app-token.outcome == 'success' &&
           (steps.metadata.outputs.update-type == 'version-update:semver-patch' ||
            steps.metadata.outputs.update-type == 'version-update:semver-minor')
         run: gh pr merge --auto --squash "$PR_URL"
@@ -52,11 +58,47 @@ jobs:
           PR_URL: ${{ github.event.pull_request.html_url }}
           GH_TOKEN: ${{ steps.app-token.outputs.token }}
 
-      # Deliberately loud. Auto-merge staying off is a safe state — bumps wait for a manual
-      # merge, which does deploy — but it must not be a silent one, since silence is exactly
-      # how the original problem hid. Note the credentials have to be stored as *Dependabot*
-      # secrets: a Dependabot-triggered workflow cannot see Actions secrets.
-      - name: Report that auto-merge is disabled
-        if: env.APP_ID == ''
+      # Three outcomes, each reported distinctly. "Auto-merge quietly stopped working" is
+      # the exact failure this workflow exists to prevent, so it must not fail that way
+      # itself.
+      #
+      # Not configured is a legitimate state, so the job stays green — bumps wait for a
+      # manual merge, which does deploy. Written to the step summary as well as an
+      # annotation, because annotations are easy to miss on a green run.
+      - name: Report that auto-merge is not configured
+        if: steps.app-token.outcome == 'skipped'
         run: |
-          echo "::notice title=Dependabot auto-merge disabled::AUTOMERGE_APP_ID is not set, so this PR will not auto-merge. Merge it by hand (that does trigger a deploy). To enable automation, add AUTOMERGE_APP_ID and AUTOMERGE_APP_PRIVATE_KEY as Dependabot secrets — see .github/workflows/dependabot-automerge.yml."
+          echo "::notice title=Dependabot auto-merge not configured::AUTOMERGE_APP_ID is unset, so this PR will not auto-merge. Merge it by hand — that does trigger a deploy."
+          {
+            echo "### Dependabot auto-merge: not configured"
+            echo
+            echo "\`AUTOMERGE_APP_ID\` is unset, so this PR will **not** auto-merge."
+            echo "Merging by hand works and does trigger a deploy."
+            echo
+            echo "To enable automation, add both of these as **Dependabot** secrets"
+            echo "(Settings → Secrets and variables → Dependabot), not Actions secrets —"
+            echo "a Dependabot-triggered workflow cannot read Actions secrets:"
+            echo
+            echo "- \`AUTOMERGE_APP_ID\`"
+            echo "- \`AUTOMERGE_APP_PRIVATE_KEY\`"
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      # Configured but unusable: the mint step has already failed the job, so the signal is
+      # a red run. This adds only the diagnosis, which a bare "mint failed" does not give.
+      # Needs !cancelled(), since the implicit success() would otherwise skip it on a job
+      # that has already failed.
+      - name: Report that auto-merge is misconfigured
+        if: ${{ !cancelled() && steps.app-token.outcome == 'failure' }}
+        run: |
+          echo "::error title=Dependabot auto-merge misconfigured::AUTOMERGE_APP_ID is set but no installation token could be issued, so this PR was not merged."
+          {
+            echo "### Dependabot auto-merge: misconfigured"
+            echo
+            echo "\`AUTOMERGE_APP_ID\` is set, but minting an installation token failed,"
+            echo "so this PR was not merged. Most likely one of:"
+            echo
+            echo "- \`AUTOMERGE_APP_PRIVATE_KEY\` is missing, or stored as an **Actions**"
+            echo "  secret rather than a **Dependabot** secret"
+            echo "- the key does not match \`AUTOMERGE_APP_ID\`"
+            echo "- the App is no longer installed on this repository"
+          } >> "$GITHUB_STEP_SUMMARY"
