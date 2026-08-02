@@ -9,12 +9,16 @@ SSH_KEY="${DEPLOY_SSH_KEY:-$HOME/.ssh/oracle}"
 REMOTE_DIR=knowledger-bot
 SSH="ssh -i $SSH_KEY $HOST"
 
+# Must match the image deploy.yml builds and pushes. A bare local tag here is what let
+# `docker run knowledger` silently resurrect a stale locally-built image after a CI deploy.
+IMAGE_REPO=ghcr.io/guidodinello/knowledger
+
 usage() {
     echo "Usage: $0 <command>"
-    echo "  env      — sync .env.oracle to server and restart container"
-    echo "  cookies  — sync cookies.txt to server and restart container"
-    echo "  channels — seed server's data/channels.json (refuses if it already exists) and restart container"
-    echo "  update   — git pull on server, rebuild image, recreate container"
+    echo "  env      — sync .env.oracle to server and restart container (same image)"
+    echo "  cookies  — sync cookies.txt to server and restart container (same image)"
+    echo "  channels — seed server's data/channels.json (refuses if it already exists; no restart)"
+    echo "  update   — deploy the image CI built for origin/main"
     echo "  logs     — tail container logs"
     echo "  restart  — restart container"
     echo "  inspect  — print the retry queue, channel/video poller state, and watch list"
@@ -70,7 +74,28 @@ inspect() {
     _print_remote_json "channels.json (watch list)" "$REMOTE_DIR/data/channels.json"
 }
 
+# The image `recreate` should run. `env`/`cookies`/`channels`/`restart` are config syncs,
+# not deploys: they must put back exactly the image that was already running, never pick a
+# different one. So the running container is the source of truth, and the origin/main tag is
+# only the fallback for when nothing is running (first provision, or after a crash+prune).
+resolve_image() {
+    local running
+    running="$($SSH "docker inspect knowledger --format '{{.Config.Image}}' 2>/dev/null" || true)"
+    if [[ -n "$running" && "$running" == "$IMAGE_REPO":* ]]; then
+        echo "$running"
+        return
+    fi
+    # A bare `knowledger` tag lands here too: it is the stale-local-build case, and pinning
+    # to origin/main is the recovery, not something to preserve.
+    echo "$IMAGE_REPO:$(git rev-parse --short origin/main)"
+}
+
+# recreate [image] — with no argument, keeps whatever is already running (config syncs).
+# `update` passes the origin/main tag explicitly, because upgrading is its whole job.
 recreate() {
+    local image="${1:-$(resolve_image)}"
+    echo "Image: $image"
+
     # Order matters here, in both directions.
     #
     # The old container is removed *first* because it runs as root (any pre-non-root
@@ -81,9 +106,10 @@ recreate() {
     # mkdir precedes chown because chown exits 1 on a missing path, and `set -euo
     # pipefail` (line 2) would abort the whole deploy on a host that has never been
     # provisioned — the case mkdir -p is here for.
+    $SSH "docker pull $image"
     $SSH "docker rm -f knowledger 2>/dev/null || true"
     $SSH "mkdir -p \$HOME/knowledger-bot/data && sudo chown -R 1001:1001 \$HOME/knowledger-bot/data"
-    $SSH "cd $REMOTE_DIR && docker run -d --name knowledger --restart unless-stopped --network=host --env-file .env -v \$HOME/knowledger-bot/cookies.txt:/app/cookies.txt:ro -v \$HOME/knowledger-bot/data:/app/data --log-opt max-size=10m --log-opt max-file=3 knowledger"
+    $SSH "cd $REMOTE_DIR && docker run -d --name knowledger --restart unless-stopped --network=host --env-file .env -v \$HOME/knowledger-bot/cookies.txt:/app/cookies.txt:ro -v \$HOME/knowledger-bot/data:/app/data --log-opt max-size=10m --log-opt max-file=3 $image"
     echo "Waiting for bot to start..."
     $SSH "docker logs -f knowledger 2>&1 | grep -m1 'Application started'"
     echo "Bot is up."
@@ -105,17 +131,20 @@ case "${1:-}" in
         $SSH "docker logs --tail 20 knowledger"
         ;;
     channels)
+        # No recreate: sync_channels() re-reads the watch list every tick (poller.py), so the
+        # seed takes effect within one POLL_INTERVAL_SECONDS on its own. Restarting bought
+        # nothing and cost a container bounce.
         echo "Seeding data/channels.json..."
         sync_channels
-        echo "Recreating container..."
-        recreate
-        $SSH "docker logs --tail 20 knowledger"
+        echo "Seeded. The poller picks it up on its next tick — no restart needed."
         ;;
     update)
-        echo "Pulling latest code and rebuilding..."
-        $SSH "cd $REMOTE_DIR && git fetch origin && git reset --hard origin/main && docker build --build-arg GIT_SHA=\$(git rev-parse --short HEAD) --build-arg GIT_COMMIT_DATE=\$(git log -1 --format=%cI) -t knowledger ."
-        echo "Recreating container..."
-        recreate
+        # Deploys the image CI already built for origin/main rather than building a second,
+        # divergent one on the VPS. The old local `docker build -t knowledger .` is exactly
+        # what recreate used to resurrect after a CI deploy.
+        echo "Deploying origin/main..."
+        git fetch origin --quiet
+        recreate "$IMAGE_REPO:$(git rev-parse --short origin/main)"
         $SSH "docker logs --tail 20 knowledger"
         ;;
     logs)
