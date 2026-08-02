@@ -102,13 +102,26 @@ because the poller resolves it from the handle on first sight.
 
 ### 4. Host-side plumbing — `deploy.sh`
 
-A `channels` command mirroring `sync_cookies()`, with the target inside `data/`:
+A `channels` command targeting `data/`. It is a *seed*, not a sync — deliberately unlike
+`sync_cookies()`, which can overwrite freely because `cookies.txt` is mounted `:ro` and
+nothing ever rewrites it. `data/channels.json` is the opposite: `/subscribe` appends to it
+and the poller backfills `channel_id`, so the host copy is the authority and a push from a
+stale local file would silently drop live subscriptions. The command therefore refuses when
+the host file already exists, and `inspect` is the way to read it:
 
 ```bash
 sync_channels() {
+    [[ -f channels.json ]] || die "no local channels.json — cp channels.example.json channels.json"
+    $SSH "mkdir -p $REMOTE_DIR/data"
+    ! $SSH "test -e $REMOTE_DIR/data/channels.json" || die "host copy exists; it is the authority"
     rsync -e "ssh -i $SSH_KEY" channels.json "$HOST:$REMOTE_DIR/data/channels.json"
 }
 ```
+
+(Sketch — the real guards spell the messages out over several `echo`s to stderr rather
+than through a `die` helper the script does not have.) Both exist because `set -euo pipefail` turns either miss into a bare rsync exit 23
+with no hint: a fresh clone has no local `channels.json` now that it is gitignored, and a
+never-provisioned host has no `data/` (the `mkdir -p` in `recreate` runs *after* the sync).
 
 Ownership takes care of itself: host `ubuntu` is uid 1001 (the uid Dockerfile pins
 `appuser` to, precisely because `DATA_DIR` is bind-mounted out of that user's home), and
@@ -160,12 +173,14 @@ Order matters; getting it wrong means the poller silently watches nothing.
    the repo. It is the only copy of the resolved `channel_id`s and project mappings.
 2. From the branch, `./deploy.sh channels` — seeds `~/knowledger-bot/data/channels.json`
    while the old image is still running. Harmless: that container reads
-   `/app/channels.json` and ignores this file entirely.
+   `/app/channels.json` and ignores this file entirely. Seeding is one-shot by design —
+   re-running the command after this point refuses rather than overwriting whatever
+   `/subscribe` has since added.
 3. `./deploy.sh env` — pushes `.env.oracle` without its `CHANNELS_PATH=channels.json`
-   line. Also a no-op for the running image, since that value equals the old default.
-   This step cannot be skipped and CI will never do it: left in place, the variable
-   would pin the new image straight back to the ephemeral `/app/channels.json` and defeat
-   the entire change, with no error to notice.
+   line. Optional hygiene, no functional impact: §1 deletes the only reader of the
+   variable (`channels_path` now derives from `DATA_DIR` alone), and
+   `test_channels_path_ignores_channels_path_env_var` pins that it is ignored. Left in
+   place it is dead config, not a trap.
 4. `./deploy.sh inspect` — confirm all seven entries are on the host.
 5. Merge. CI builds and deploys the image that no longer contains the file; the
    already-mounted `data/` supplies it.

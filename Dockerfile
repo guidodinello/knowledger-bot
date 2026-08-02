@@ -23,10 +23,10 @@ COPY pyproject.toml uv.lock README.md ./
 COPY knowledger/ knowledger/
 COPY main.py .
 
-# Persistent state (poller_state.json, petition_queue.json) lives here, bind-mounted to a
-# host dir at runtime (see deploy.sh). Set as an image ENV rather than in the secrets
-# env-file: it's a property of the deployment, not a secret. Local runs leave DATA_DIR
-# unset and default to ".".
+# Persistent state (poller_state.json, petition_queue.json, channels.json) lives here,
+# bind-mounted to a host dir at runtime (see deploy.sh). Set as an image ENV rather than in
+# the secrets env-file: it's a property of the deployment, not a secret. Local runs leave
+# DATA_DIR unset and default to ".".
 RUN uv sync --frozen --no-dev && mkdir -p /app/data
 ENV DATA_DIR=/app/data
 

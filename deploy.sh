@@ -13,7 +13,7 @@ usage() {
     echo "Usage: $0 <command>"
     echo "  env      — sync .env.oracle to server and restart container"
     echo "  cookies  — sync cookies.txt to server and restart container"
-    echo "  channels — sync channels.json to server's data/ dir and restart container"
+    echo "  channels — seed server's data/channels.json (refuses if it already exists) and restart container"
     echo "  update   — git pull on server, rebuild image, recreate container"
     echo "  logs     — tail container logs"
     echo "  restart  — restart container"
@@ -28,7 +28,26 @@ sync_cookies() {
     rsync -e "ssh -i $SSH_KEY" cookies.txt "$HOST:$REMOTE_DIR/cookies.txt"
 }
 
+# Seeds the host watch list. Deliberately *not* a general sync: unlike cookies.txt (mounted
+# :ro and never rewritten), data/channels.json is runtime-mutated state — /subscribe appends
+# to it and the poller backfills channel_id — so the host copy is the authority. Overwriting
+# it from a stale local file would silently drop live subscriptions and resolved ids.
+# Read the host copy with `./deploy.sh inspect`.
 sync_channels() {
+    if [[ ! -f channels.json ]]; then
+        echo "error: no local channels.json — start from the schema:" >&2
+        echo "         cp channels.example.json channels.json" >&2
+        exit 1
+    fi
+    # Before the existence test and the rsync, and before `recreate`'s own mkdir: on a host
+    # that has never been provisioned there is no data/ for either to work in.
+    $SSH "mkdir -p $REMOTE_DIR/data"
+    if $SSH "test -e $REMOTE_DIR/data/channels.json"; then
+        echo "error: $HOST:$REMOTE_DIR/data/channels.json already exists." >&2
+        echo "       It is the authority — /subscribe and the channel_id backfill write it." >&2
+        echo "       Read it with './deploy.sh inspect'; remove it on the host to re-seed." >&2
+        exit 1
+    fi
     rsync -e "ssh -i $SSH_KEY" channels.json "$HOST:$REMOTE_DIR/data/channels.json"
 }
 
@@ -86,7 +105,7 @@ case "${1:-}" in
         $SSH "docker logs --tail 20 knowledger"
         ;;
     channels)
-        echo "Syncing channels.json..."
+        echo "Seeding data/channels.json..."
         sync_channels
         echo "Recreating container..."
         recreate
