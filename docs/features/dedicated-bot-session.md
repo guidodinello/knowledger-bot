@@ -117,14 +117,49 @@ be checked at leisure.
 2. **Logout independence** — set the incognito `sessionKey` as the bot's token, then log
    out of the normal session. The bot should keep uploading. If it doesn't, claude.ai
    revokes globally, this whole approach collapses, and the extension stays the mechanism.
+   ✅ Verified 2026-07-31: dedicated token adopted via `/update-token`, normal browser
+   session logged out, bot still functioned. Logout is per-session, not global.
 3. **The extension no longer clobbers** — with the bot on a live dedicated token, log into
    claude.ai normally. The extension POSTs; the bot logs `Ignored token update — the
    current token still works` and keeps its own token.
+   ✅ Verified 2026-07-31 via `./deploy.sh logs`: two `Ignored token update — the
+   current token still works` lines (03:02:54, 03:13:37), both from the extension's Firefox
+   user-agent hitting `/update-token` after a normal-browser login — distinct from the
+   manual `curl` adoption (`curl/7.81.0` UA) used for the dedicated-token setup itself.
+   ✅ Still holding 2026-08-02: three more `Ignored token update — the current token
+   still works` lines (02:20:36, 02:22:02, 18:26:41), all from the extension's Firefox UA
+   (`Mozilla/5.0 ... Firefox/154.0`) after browser logins. No clobbering since adoption.
 4. **Renewal actually happens** — watch for `Adopted a renewed Claude session cookie` in
    the logs over the following days. Its *absence* is also a result: it means claude.ai
    doesn't renew `sessionKey` on these endpoints, so the dedicated session has a fixed
    lifetime and will eventually need a manual refresh (which the extension will handle
    automatically, since by then the current token is invalid).
+   Partial data 2026-07-31: triggered a real bot request (video upload, hits org lookup +
+   project + docs POST) — no renewal on that single call. Separately, inspected ~150+
+   requests in a live claude.ai browser session via DevTools (org lookup, projects, docs,
+   credits, memory settings, MCP endpoints) over several minutes of active use — none
+   carried `Set-Cookie: sessionKey=...` (only unrelated `__cf_bm`/telemetry cookies were
+   set).    Suggests renewal, if it happens, is not tied to routine API activity — likely
+   schedule/expiry-based rather than per-request. Still needs the passive multi-day log
+   watch to confirm either way.
+   Still inconclusive 2026-08-02: no `Adopted a renewed Claude session cookie` in the
+   current log span. Caveat: the container was recreated 02-Aug 01:47 UTC, so docker
+   logs (max-size=10m, max-file=3) only cover ~17.5h since restart — the 07-31 → 08-01
+   window is lost, and the watch effectively restarted then. One real claude.ai call
+   happened within the window (auto-upload `DR LA ROSA` at 16:49:39 to project
+   `0199b13b-...`) and carried no renewal, consistent with the 07-31 single-call data.
+   Direct probe 2026-08-02: one-shot GETs against 13 endpoints (auth'd with the
+   dedicated token, same curl_cffi impersonation the bot uses) — `/health`, `/me`,
+   `/config`, `/user`, `/settings`, `/session`, `/auth/session`, `/organizations`,
+   org-scoped `/projects`, `/credits`, `/settings`, `/model_blacklist`, and the
+   project's `/docs`. Every response set only Cloudflare's `__cf_bm` cookie; full
+   header dump on an authenticated 200 showed no custom token channel, and no response
+   body carried a `sessionKey`-like key. Three independent observations now (browser
+   DevTools, the bot's own continuous adoption watch, this probe) all show claude.ai
+   does NOT rotate `sessionKey` on routine API traffic — the "sliding expiry" premise
+   in `claude_client._adopt_renewed_token`'s docstring has no supporting evidence, and
+   the dedicated session likely has a fixed lifetime until hard expiry or revocation,
+   at which point the extension fallback (step 5) is the recovery path.
 5. **Fallback still works** — revoke the dedicated session, then log into claude.ai. The
    endpoint should answer `{"outcome": "adopted"}` and the queue should drain.
 

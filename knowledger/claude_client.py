@@ -112,11 +112,16 @@ class ClaudeClient:
         return response
 
     def _adopt_renewed_token(self, response: requests.Response) -> None:
-        """claude.ai renews `sessionKey` on a sliding expiry: responses periodically carry a
-        Set-Cookie with a fresh value that supersedes the one we sent. Discarding those
-        renewals means riding the original cookie until it hard-expires — tolerable while an
-        external updater keeps replacing the token on every browser login, but the whole
-        ballgame for a long-lived dedicated session that nothing else refreshes.
+        """Keep the session cookie current if claude.ai ever rotates it.
+
+        No rotation has ever been observed: a DevTools session, the bot's own continuous
+        watch, and a direct probe of 13 endpoints (2026-08-02) all showed responses
+        carrying only Cloudflare's `__cf_bm` cookie. The dedicated session therefore
+        likely has a fixed lifetime until hard expiry or revocation. This is kept as a
+        cheap, inert safety net: if claude.ai ever does renew (time-based rotation, or an
+        endpoint we haven't probed), the bot captures the fresh value instead of riding
+        the original cookie to its death — with the extension as the fallback that
+        replaces the token once it actually stops working.
 
         Deliberately does NOT route through update_token(): a renewal is the same session on
         the same account, so the org and project caches stay valid and only the cookie

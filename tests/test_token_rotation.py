@@ -1,5 +1,5 @@
-"""Covers the two halves of keeping a long-lived dedicated session alive: adopting the
-renewed `sessionKey` claude.ai hands back on a sliding expiry, and probing whether the
+"""Covers the two halves of keeping a long-lived dedicated session alive: adopting a
+renewed `sessionKey` if claude.ai ever hands one back, and probing whether the
 current cookie is still accepted (without mistaking an outage for a revoked token)."""
 
 import json
