@@ -73,7 +73,7 @@ jobs:
       - uses: astral-sh/setup-uv@v7
 
       - name: Install dependencies
-        run: uv sync --dev
+        run: uv sync --locked --dev
 
       # Scoped to the Python tree rather than `.` on purpose: ruff also formats
       # Python snippets embedded in Markdown, and docs/bugs/*.md deliberately
@@ -94,7 +94,7 @@ jobs:
       - uses: astral-sh/setup-uv@v7
 
       - name: Install dependencies
-        run: uv sync --dev
+        run: uv sync --locked --dev
 
       - name: pyright
         run: uv run pyright
@@ -109,7 +109,7 @@ jobs:
       - uses: astral-sh/setup-uv@v7
 
       - name: Install dependencies
-        run: uv sync --dev
+        run: uv sync --locked --dev
 
       - name: Run tests
         run: uv run pytest
@@ -124,7 +124,7 @@ jobs:
       - uses: astral-sh/setup-uv@v7
 
       - name: Install dependencies
-        run: uv sync --dev
+        run: uv sync --locked --dev
 
       - name: bandit
         run: uv run bandit -r knowledger cli.py main.py scripts
@@ -262,6 +262,49 @@ jobs:
 
           npx --yes markdownlint-cli@0.49.0 "${files[@]}" --ignore node_modules --ignore .venv --ignore .git
 
+  # ── Image build + suite against the real runtime libc ──────────────────────
+  # The gap this closes is the one #58 fell through: nothing else here builds the image, so
+  # a runtime-only failure in the container passed every job and deployed. It matters more
+  # now that Dependabot auto-merges patch/minor `docker` bumps — a base-image bump that
+  # breaks the build or the app would otherwise merge green.
+  #
+  # Running the suite inside the image is also what keeps the Alpine base honest: the tests
+  # execute against musl here, so ctypes-level code that only works on glibc fails in CI
+  # instead of in production (#59).
+  build-image:
+    name: Build Image & Test Inside
+    runs-on: ${{ fromJSON(vars.CI_RUNNERS || '["ubuntu-latest"]') }}
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Build test image
+        run: docker build --target test -t knowledger:test .
+
+      # Non-root: several tests assert PermissionError on mode-0000 files, and root ignores
+      # file modes, so a root-run suite would report false passes. HOME is redirected
+      # because /app and its venv are root-owned.
+      - name: Run suite inside the image
+        run: |
+          docker run --rm --user 1000:1000 -e HOME=/tmp knowledger:test \
+            .venv/bin/python -m pytest tests/ -q -p no:cacheprovider
+
+      - name: Build runtime image
+        run: docker build -t knowledger:runtime .
+
+      - name: Runtime image starts and is lean
+        run: |
+          docker run --rm --entrypoint sh knowledger:runtime -c \
+            'uv run --no-sync python -c "import knowledger.bot, knowledger.poller, knowledger.persistence"'
+          # Asserts the default build target is `runtime`, not `test`. If a stage is ever
+          # appended after runtime in the Dockerfile, dev dependencies would silently ship
+          # to production and this fails.
+          if docker run --rm --entrypoint sh knowledger:runtime -c \
+               '.venv/bin/python -c "import pytest"' 2>/dev/null; then
+            echo "::error::runtime image contains pytest — default build target is not 'runtime'"
+            exit 1
+          fi
+          echo "runtime image is free of dev dependencies"
+
   # ── Summary gate (the single required status check for branch rules) ───────
   # Requiring this one context instead of enumerating jobs means adding a job
   # never needs a matching ruleset edit. `if: always()` is mandatory: without it
@@ -275,6 +318,7 @@ jobs:
       - typecheck-python
       - test-python
       - security-python
+      - build-image
       - lint-dockerfile
       - lint-shell
       - lint-workflows

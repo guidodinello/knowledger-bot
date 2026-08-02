@@ -21,11 +21,11 @@ dev = [
     "bandit>=1.8.0",
     "vulture>=2.14",
     "pip-audit>=2.7.3",
-    # Kept in step with the ruff-pre-commit rev in .pre-commit-config.yaml so the
-    # hook and CI run the same formatter. Without ruff declared here, `uv run ruff`
-    # silently falls back to whatever is on PATH — which works on a dev machine and
-    # fails outright on a clean runner.
-    "ruff>=0.15.12",
+    # Pinned exactly, and the pre-commit hook runs this same binary via `uv run` rather
+    # than a separately versioned ruff-pre-commit rev. A floor (`>=`) plus an independent
+    # hook rev is what let the hook format with one ruff while CI checked with another;
+    # one pin consumed by both removes the drift instead of documenting it.
+    "ruff==0.16.1",
 ]
 
 [build-system]

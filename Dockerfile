@@ -1,16 +1,23 @@
-# Debian slim, not Alpine, deliberately. On musl there are no manylinux wheels, so every
-# dependency compiled from source — hence the gcc/musl-dev/libffi-dev install this replaces
-# — and, more importantly, musl exports a different set of libc symbols than the glibc the
-# test suite runs on. That divergence shipped a crash loop: code resolving renameat2 via
-# ctypes passed every test and died on startup in production (see #59). Matching the libc
-# CI tests against removes the whole class, and every dependency here has a prebuilt
-# manylinux wheel, so dropping Alpine also drops the compiler from the image.
-# Pinned to the same patch version as .python-version so local, CI, and prod agree.
-FROM python:3.14.5-slim-trixie
+# Alpine, deliberately. aa1e198 ("fix: Dockerfile to reduce vulnerabilities", co-authored
+# by snyk-bot) moved off python:3.13-slim precisely to clear Debian 13 CVEs, and that still
+# holds: a trivy scan of the two candidate bases reports 26 HIGH/CRITICAL OS advisories for
+# python:3.14.5-slim-trixie against 2 for this one. Going back to Debian to unify libc would
+# have traded a 13x vulnerability surface for it.
+#
+# The glibc-vs-musl divergence that caused #59 is closed instead by the `test` stage below,
+# which runs the suite against this exact base in CI — detecting libc-specific failures
+# rather than eliminating them by importing Debian's CVEs.
+#
+# The gcc/musl-dev/libffi-dev install this used to need is gone: every dependency now
+# publishes a musllinux wheel, so nothing compiles from source and no compiler ships in the
+# image. That also retires three hand-pinned apk revisions that broke on every Alpine bump.
+FROM python:3.14.5-alpine3.22 AS base
 
 WORKDIR /app
 
-COPY --from=ghcr.io/astral-sh/uv:latest /uv /usr/local/bin/uv
+# Pinned, not `:latest`: a floating tag changes on any registry push and silently alters
+# the build. Dependabot cannot track a COPY --from reference, so this is bumped by hand.
+COPY --from=ghcr.io/astral-sh/uv:0.11.29 /uv /usr/local/bin/uv
 
 COPY pyproject.toml uv.lock README.md ./
 COPY knowledger/ knowledger/
@@ -24,8 +31,8 @@ COPY channels.json .
 RUN uv sync --frozen --no-dev && mkdir -p /app/data
 ENV DATA_DIR=/app/data
 
-# Run unprivileged. Nothing here needs root: the HTTP token endpoint binds 8080 (above
-# the privileged range), and the only writes go to DATA_DIR.
+# The account the runtime stage drops to. Nothing here needs root: the HTTP token endpoint
+# binds 8080 (above the privileged range), and the only writes go to DATA_DIR.
 #
 # The uid/gid is pinned to 1001 to match the `ubuntu` account on the deployment host,
 # because DATA_DIR is bind-mounted out of that user's home. The match is not cosmetic:
@@ -33,8 +40,10 @@ ENV DATA_DIR=/app/data
 # fails closed if it cannot be read, so a mismatched uid would crash the bot at startup
 # rather than degrade. Existing state files are root-owned from when this ran as root, so
 # deploy.sh and the CI deploy chown DATA_DIR before starting the container.
-RUN groupadd --gid 1001 appuser \
-    && useradd --uid 1001 --gid 1001 --create-home --shell /usr/sbin/nologin appuser \
+#
+# busybox addgroup/adduser rather than groupadd/useradd — this is Alpine, not Debian.
+RUN addgroup -g 1001 appuser \
+    && adduser -D -u 1001 -G appuser -s /sbin/nologin appuser \
     && chown -R appuser:appuser /app
 
 # Invoke the venv interpreter directly instead of going through `uv run`: uv requires a
@@ -46,6 +55,21 @@ ARG GIT_COMMIT_DATE=
 ENV GIT_SHA=${GIT_SHA}
 ENV GIT_COMMIT_DATE=${GIT_COMMIT_DATE}
 
-USER appuser
+# CI-only target: runs the test suite against the real runtime libc. It adds the dev group
+# plus the files the runtime image deliberately omits (tests, scripts, cli). Dev deps are
+# installed at build time so the suite needs no writable cache at run time and can execute
+# as a non-root uid — necessary because the chmod-based permission tests are vacuous under
+# root, which ignores mode 0000. This stage deliberately does NOT set USER: the dev sync
+# needs root at build time, and ci.yml supplies a non-root uid when it runs the suite.
+FROM base AS test
+COPY tests/ tests/
+COPY scripts/ scripts/
+COPY cli.py .
+RUN uv sync --frozen --dev
 
+# Runtime is intentionally the LAST stage: deploy.yml and deploy.sh both build without
+# --target, so the default must resolve here and never to `test`. Do not append a stage
+# after this one. ci.yml asserts the built runtime image has no pytest to catch a slip.
+FROM base AS runtime
+USER appuser
 CMD ["python", "main.py"]
