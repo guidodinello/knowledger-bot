@@ -26,7 +26,7 @@ from knowledger.youtube import VideoMetadata
 
 
 class FakeCookies:
-    """ClaudeClient reads `sessionKey` off every response to pick up session renewals;
+    """ClaudeClient reads `sessionKey` off every response in case of a renewal;
     these fixtures carry none, so the client keeps the token it was constructed with."""
 
     def get(self, _name: str) -> str | None:
