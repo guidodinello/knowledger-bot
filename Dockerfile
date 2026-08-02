@@ -32,7 +32,12 @@ RUN uv sync --frozen --no-dev && mkdir -p /app/data
 ENV DATA_DIR=/app/data
 
 # The account the runtime stage drops to. Nothing here needs root: the HTTP token endpoint
-# binds 8080 (above the privileged range), and the only writes go to DATA_DIR.
+# binds 8080, above the privileged range.
+#
+# Writes are not confined to DATA_DIR. Several paths are CWD-relative and therefore land in
+# /app itself: logs/knowledger_<date>.log and its rotations (config.py), plus channels.json
+# and the channels.json.lock beside it (poller.py). That is why the chown below covers all
+# of /app rather than DATA_DIR alone.
 #
 # The uid/gid is pinned to 1001 to match the `ubuntu` account on the deployment host,
 # because DATA_DIR is bind-mounted out of that user's home. The match is not cosmetic:
@@ -46,8 +51,15 @@ RUN addgroup -g 1001 appuser \
     && adduser -D -u 1001 -G appuser -s /sbin/nologin appuser \
     && chown -R appuser:appuser /app
 
-# Invoke the venv interpreter directly instead of going through `uv run`: uv requires a
-# writable cache (/.cache/uv) and aborts with a permission error for a non-root user.
+# Invoke the venv interpreter directly rather than through `uv run`, following docker.md's
+# direct-entrypoint guidance: it keeps uv out of the runtime path and skips its environment
+# resolution on every start.
+#
+# To be clear about what this is *not* working around: `uv run` would function fine here.
+# appuser has a real home, so its cache at ~/.cache/uv is writable. An earlier version of
+# this comment claimed uv aborts for any non-root user, which was wrong — that error came
+# from testing with `--user 1001:1001` against an image with no matching passwd entry, which
+# left HOME as / and made /.cache/uv unwritable.
 ENV PATH="/app/.venv/bin:$PATH"
 
 ARG GIT_SHA=

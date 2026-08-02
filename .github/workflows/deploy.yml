@@ -81,12 +81,19 @@ jobs:
             IMAGE=ghcr.io/${{ github.repository_owner }}/knowledger:${{ needs.build.outputs.short_sha }}
             cd /home/ubuntu/knowledger-bot
             docker pull "$IMAGE"
-            # The container runs as uid 1001 (see Dockerfile). State files written by
-            # earlier root-running versions are owned by uid 0, and session_token.json is
-            # mode 0600 whose unreadability is a fail-closed startup error — so ownership
-            # must be corrected before the new container starts, not after. Idempotent.
-            sudo chown -R 1001:1001 /home/ubuntu/knowledger-bot/data
+            # Order matters here, in both directions.
+            #
+            # The old container is removed first because it runs as root (any
+            # pre-non-root image): its atomic-replace writes create fresh uid-0
+            # state files, so chowning while it is still live re-roots whatever
+            # it touches, which is the race this chown exists to avoid.
+            #
+            # mkdir precedes chown because chown exits 1 on a missing path and
+            # script_stop: true aborts the remote script on the first failure,
+            # so a first deploy to an unprovisioned host would die here.
             docker rm -f knowledger || true
+            mkdir -p /home/ubuntu/knowledger-bot/data
+            sudo chown -R 1001:1001 /home/ubuntu/knowledger-bot/data
             docker run -d --name knowledger \
               --restart unless-stopped \
               --network=host \
