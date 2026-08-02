@@ -2,28 +2,61 @@ name: Dependabot auto-merge
 
 on: pull_request
 
+# The merge is performed with the App token below, so this workflow's own GITHUB_TOKEN
+# only needs read access. Dependabot-triggered runs get a read-only one regardless.
 permissions:
-  contents: write
-  pull-requests: write
+  contents: read
+  pull-requests: read
 
 jobs:
   auto-merge:
     runs-on: ubuntu-latest
     if: github.actor == 'dependabot[bot]'
+    # Surfaced as env rather than read inline so the steps below can branch on whether the
+    # App is configured: the `secrets` context is not available in a step `if`, but `env` is.
+    env:
+      APP_ID: ${{ secrets.AUTOMERGE_APP_ID }}
     steps:
       - name: Fetch Dependabot metadata
         id: metadata
         uses: dependabot/fetch-metadata@v3
 
-      # `--auto` queues the merge behind required status checks rather than
-      # merging immediately, so the CI gate still decides. That makes the branch
-      # ruleset's required check load-bearing here: without it, this would merge
-      # dependency bumps straight to main and deploy them unverified.
+      # A merge made with GITHUB_TOKEN triggers no further workflows: GitHub suppresses them
+      # so a workflow cannot set off another indefinitely. Here that silently broke the
+      # pipeline rather than merely inconveniencing it — #62 and #63 auto-merged and produced
+      # no workflow runs at all, so neither CI nor the deploy fired, and the bumps sat on
+      # main undeployed until an unrelated human merge happened to carry them out. Nothing
+      # reported a problem, which is the dangerous part: a security bump can look applied
+      # while never reaching production.
+      #
+      # A short-lived GitHub App installation token is the sanctioned fix. A PAT also works
+      # but is a long-lived credential with write access; the App token is scoped to this
+      # installation and expires within the hour. Only this step needs it.
+      - name: Mint a GitHub App token
+        id: app-token
+        if: env.APP_ID != ''
+        uses: actions/create-github-app-token@v3
+        with:
+          app-id: ${{ env.APP_ID }}
+          private-key: ${{ secrets.AUTOMERGE_APP_PRIVATE_KEY }}
+
+      # `--auto` queues the merge behind the required CI check rather than merging
+      # immediately, so the branch ruleset still decides whether it lands.
       - name: Auto-merge patch and minor updates
         if: |
-          steps.metadata.outputs.update-type == 'version-update:semver-patch' ||
-          steps.metadata.outputs.update-type == 'version-update:semver-minor'
+          env.APP_ID != '' &&
+          (steps.metadata.outputs.update-type == 'version-update:semver-patch' ||
+           steps.metadata.outputs.update-type == 'version-update:semver-minor')
         run: gh pr merge --auto --squash "$PR_URL"
         env:
           PR_URL: ${{ github.event.pull_request.html_url }}
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GH_TOKEN: ${{ steps.app-token.outputs.token }}
+
+      # Deliberately loud. Auto-merge staying off is a safe state — bumps wait for a manual
+      # merge, which does deploy — but it must not be a silent one, since silence is exactly
+      # how the original problem hid. Note the credentials have to be stored as *Dependabot*
+      # secrets: a Dependabot-triggered workflow cannot see Actions secrets.
+      - name: Report that auto-merge is disabled
+        if: env.APP_ID == ''
+        run: |
+          echo "::notice title=Dependabot auto-merge disabled::AUTOMERGE_APP_ID is not set, so this PR will not auto-merge. Merge it by hand (that does trigger a deploy). To enable automation, add AUTOMERGE_APP_ID and AUTOMERGE_APP_PRIVATE_KEY as Dependabot secrets — see .github/workflows/dependabot-automerge.yml."
