@@ -48,12 +48,24 @@ repos:
         args: [--fix]
         stages: [pre-push]
 
-  - repo: https://github.com/astral-sh/ruff-pre-commit
-    rev: v0.11.6
+  # ruff runs through the project's pinned ruff (pyproject dev group) rather than
+  # ruff-pre-commit, so the hook and CI cannot resolve different versions. Matches the
+  # local-hook pattern already used below for pyright/bandit/pytest. `types: [python]`
+  # keeps this off Markdown: ruff also formats Python snippets in .md, and docs/bugs/*.md
+  # deliberately holds misformatted "before" code.
+  - repo: local
     hooks:
       - id: ruff
-        args: [--fix, --exit-non-zero-on-fix]
+        name: ruff
+        entry: uv run ruff check --fix --exit-non-zero-on-fix
+        language: system
+        types: [python]
+
       - id: ruff-format
+        name: ruff-format
+        entry: uv run ruff format
+        language: system
+        types: [python]
 
   - repo: https://github.com/jendrikseipp/vulture
     rev: v2.14

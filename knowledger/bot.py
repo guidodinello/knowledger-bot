@@ -80,9 +80,7 @@ class PendingUpload(TypedDict):
 
 CustomContext = CallbackContext[Any, dict, dict, BotData]
 
-YOUTUBE_URL_PATTERN = (
-    r"https?://(?:(?:www|m)\.)?(?:youtube\.com/(?:watch|shorts/)|youtu\.be/)\S+"
-)
+YOUTUBE_URL_PATTERN = r"https?://(?:(?:www|m)\.)?(?:youtube\.com/(?:watch|shorts/)|youtu\.be/)\S+"
 
 
 def _keyboard_for(

@@ -1,0 +1,32 @@
+version: 2
+updates:
+  # `uv`, not `pip`. The pip ecosystem edits pyproject.toml without touching uv.lock, and
+  # a stale lock fails silently rather than loudly: the Dockerfile's `uv sync --frozen`
+  # installs the old locked version and exits 0, so a bump would look merged and deployed
+  # while never reaching the image. The uv ecosystem keeps pyproject.toml and uv.lock in
+  # step. CI additionally syncs with --locked so any drift fails the build.
+  - package-ecosystem: uv
+    directory: /
+    schedule:
+      interval: weekly
+    groups:
+      python-dependencies:
+        patterns:
+          - "*"
+
+  - package-ecosystem: github-actions
+    directory: /
+    schedule:
+      interval: weekly
+    groups:
+      github-actions:
+        patterns:
+          - "*"
+
+  # Tracks the `FROM python:...` base image. The uv binary is pinned in the Dockerfile but
+  # arrives via `COPY --from`, which Dependabot does not parse, so that tag is bumped by
+  # hand. Every bump here is verified by the build-image CI job before it can auto-merge.
+  - package-ecosystem: docker
+    directory: /
+    schedule:
+      interval: weekly

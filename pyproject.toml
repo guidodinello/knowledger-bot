@@ -20,6 +20,12 @@ dev = [
     "pyright>=1.1.390",
     "bandit>=1.8.0",
     "vulture>=2.14",
+    "pip-audit>=2.7.3",
+    # Pinned exactly, and the pre-commit hook runs this same binary via `uv run` rather
+    # than a separately versioned ruff-pre-commit rev. A floor (`>=`) plus an independent
+    # hook rev is what let the hook format with one ruff while CI checked with another;
+    # one pin consumed by both removes the drift instead of documenting it.
+    "ruff==0.16.1",
 ]
 
 [build-system]
