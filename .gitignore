@@ -33,6 +33,3 @@ logs/
 
 # Local working input (fetched chat transcript) — not published
 docs/features/*-chat.md
-
-# Local tooling state (Claude Code / opencode)
-.claude/
