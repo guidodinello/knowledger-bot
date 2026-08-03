@@ -113,12 +113,16 @@ def test_inqueue_shows_counts_stuck_marker_and_caps_long_lists(tmp_path: Path) -
     asyncio.run(cmd_inqueue(update, context))  # type: ignore[arg-type]
 
     text, _ = message.replies[0]
-    assert "Retry queue — 2 queued" in text
+    assert "RETRY QUEUE — 2 queued" in text
     assert "🛑" in text  # stuck marker; same emoji as the stuck alert
     assert "4 failed attempts" in text
     assert "run /refresh to retry" in text
-    assert "Poller — 12 waiting to upload" in text
+    assert "POLLER — 12 waiting to upload" in text
     assert "+2 more" in text
+    # Entries sit inside their section's quote, which is what subordinates them to its
+    # header — and every quote closes, or Telegram rejects the whole message.
+    assert text.count("<blockquote>") == 2
+    assert text.count("</blockquote>") == 2
     assert "12 videos seen since the poller started." in text
     # Titles link back to the video rather than sitting there as dead text.
     assert '<a href="https://youtu.be/v0">Title 0</a>' in text

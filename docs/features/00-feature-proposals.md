@@ -17,6 +17,7 @@
 | [Per-channel Claude project + baseline seeding](per-channel-project-and-baseline-seed.md) | Lets each watched YouTube channel target its own Claude project (investments vs. exercise, etc.) instead of one global project, and seeds new channels without flooding their back-catalogue |
 | [`/version` command](version-command.md) | Reports the git SHA and commit date of the running build, baked in at image build time, so production's actual version is visible from Telegram |
 | [Dedicated bot session](dedicated-bot-session.md) | Decouples the bot's auth from the browser's login state: adopts renewed `sessionKey` cookies off Claude responses, and stops `/update-token` from overwriting a token that still works |
+| [Message hierarchy pass](message-hierarchy-pass.md) | Readability pass over the five most-read messages: a tappable commit SHA in `/version`, bulleted `/help`, blockquoted sections in `/inqueue`, the auto-save notification naming its project instead of echoing a uuid, and `/subscribed` grouped by project with linked channel names |
 | [`/subscribed` and `/subscribe` commands](subscribe-commands.md) | Lists the watched channels and adds new ones from a link to any of their videos, with a project picker — and makes the poller re-read `channels.json` every tick so a new channel is watched without a restart |
 
 ## Proposed

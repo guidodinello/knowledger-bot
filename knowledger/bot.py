@@ -1,4 +1,5 @@
 import asyncio
+from collections import defaultdict
 from collections.abc import Awaitable, Callable, Coroutine
 from datetime import UTC, datetime
 from functools import wraps
@@ -26,7 +27,7 @@ from .pending_transcripts import (
     token_expired_message,
 )
 from .persistence import PersistenceError
-from .poller import UPLOAD_DELAY, PollerState, load_channels
+from .poller import UPLOAD_DELAY, Channel, PollerState, load_channels
 from .queue import Queue, QueueEntry
 from .queue_processor import DrainResult, QueueProcessor
 from .subscriptions import (
@@ -39,6 +40,7 @@ from .subscriptions import (
 from .telegram_format import (
     NO_PREVIEW,
     PARSE_MODE,
+    blockquote,
     bold,
     cap_entries,
     cap_message,
@@ -46,6 +48,8 @@ from .telegram_format import (
     esc,
     fmt_age,
     fmt_ts,
+    italic,
+    link,
     subject,
     video_link,
 )
@@ -215,17 +219,21 @@ _COMMANDS: list[tuple[str, str, str]] = [
     ("subscribe", "<link>", "watch a channel for new uploads"),
     ("subscribed", "", "list watched channels"),
     ("inqueue", "", "what's waiting to upload"),
-    ("refresh", "", "reload the project list and retry the queue"),
+    ("refresh", "", "reload projects and retry the queue"),
     ("version", "", "show the running build"),
     ("help", "", "show this message"),
 ]
 
 
 def _help_text() -> str:
+    """Bulleted because entries wrap at phone width, and an unbulleted wrap is
+    indistinguishable from the next command — the bullet is what marks where one entry
+    ends. Descriptions stay verb phrases: the same strings are Telegram's native command
+    menu (see _register_commands), where a bare noun reads as a label, not an action."""
     lines = ["Send me a YouTube URL and I'll save its transcript to a Claude project.", ""]
     for name, usage, description in _COMMANDS:
         command = f"/{name} {usage}".rstrip()
-        lines.append(f"{esc(command)} — {esc(description)}")
+        lines.append(f"• {esc(command)} — {esc(description)}")
     return "\n".join(lines)
 
 
@@ -241,6 +249,12 @@ async def cmd_help(update: Update, context: CustomContext, user: User) -> None:
     await cmd_start(update, context)
 
 
+# Hardcoded rather than baked in beside GIT_SHA: a third build arg would have to be
+# passed by both build paths (CI and deploy.sh), and the one that forgot would silently
+# ship a broken link. The repo this bot is built from is not a per-deployment fact.
+_REPO_URL = "https://github.com/guidodinello/knowledger-bot"
+
+
 @_require_auth
 async def cmd_version(update: Update, context: CustomContext, user: User) -> None:
     if update.message is None:
@@ -252,14 +266,18 @@ async def cmd_version(update: Update, context: CustomContext, user: User) -> Non
             "working copy rather than a release image.",
         )
         return
-    line = f"Running {code(version.commit_sha)}"
+    line = f"Running {link(version.commit_sha, f'{_REPO_URL}/commit/{version.commit_sha}')}"
     if version.commit_date:
         age = fmt_age(version.commit_date)
         committed = fmt_ts(version.commit_date)
         line += f", committed {esc(committed)}"
         if age:
             line += f" ({esc(age)})"
-    await update.message.reply_text(line + ".", parse_mode=PARSE_MODE)
+    await update.message.reply_text(
+        line + ".",
+        parse_mode=PARSE_MODE,
+        link_preview_options=NO_PREVIEW,
+    )
 
 
 @_require_auth
@@ -330,6 +348,15 @@ _INQUEUE_MAX_ENTRIES = 10  # per-section cap before a "+N more" trailer
 _STUCK_MARKER = "🛑 "  # prefix for entries with upload_attempts > 0; matches the stuck alert
 
 
+def _section_header(emoji: str, label: str, summary: str) -> str:
+    """A section title that outranks the entries beneath it.
+
+    HTML parse mode has no font sizes, so "make the header bigger" has to be spent on
+    the two signals that do exist: caps on the label, and bold across the line. Caps are
+    confined to the label — a shouted "1 WAITING TO UPLOAD" reads as an alarm."""
+    return f"{emoji} {bold(f'{label.upper()} — {summary}')}"
+
+
 @_require_auth
 async def cmd_inqueue(update: Update, context: CustomContext, user: User) -> None:
     if update.message is None:
@@ -343,17 +370,17 @@ async def cmd_inqueue(update: Update, context: CustomContext, user: User) -> Non
     queue: Queue = context.bot_data["queue"]
     retry_entries = queue.peek()
     if retry_entries:
-        block = [f"🔁 {bold(f'Retry queue — {len(retry_entries)} queued')}"]
+        block = [_section_header("🔁", "Retry queue", f"{len(retry_entries)} queued")]
         entry_lines = []
         for e in retry_entries:
             marker = _STUCK_MARKER if e.upload_attempts else ""
             title = video_link(e.video_title, e.video_id)
             attempts = f" — {e.upload_attempts} failed attempts" if e.upload_attempts else ""
-            detail = f"  queued {fmt_ts(e.queued_at)}"
+            detail = f"queued {fmt_ts(e.queued_at)}"
             if e.upload_attempts:
                 detail += " — run /refresh to retry"
-            entry_lines.append([f"• {marker}{title}{attempts}", detail])
-        block.extend(cap_entries(entry_lines, _INQUEUE_MAX_ENTRIES))
+            entry_lines.append([f"• {marker}{title}{attempts}", f"  {italic(detail)}"])
+        block.extend(blockquote(cap_entries(entry_lines, _INQUEUE_MAX_ENTRIES)))
         sections.append(block)
 
     # ⏳ Poller pending — PendingVideo: has upload_attempts and channel_name, no /refresh.
@@ -365,16 +392,16 @@ async def cmd_inqueue(update: Update, context: CustomContext, user: User) -> Non
         problems.append("⏳ Couldn't read the poller's state — check the logs.")
     else:
         if state.pending:
-            header = f"Poller — {len(state.pending)} waiting to upload"
-            block = [f"⏳ {bold(header)}"]
+            summary = f"{len(state.pending)} waiting to upload"
+            block = [_section_header("⏳", "Poller", summary)]
             entry_lines = []
             for v in state.pending:
                 marker = _STUCK_MARKER if v.upload_attempts else ""
                 title = video_link(v.title, v.video_id)
                 attempts = f" — {v.upload_attempts} failed attempts" if v.upload_attempts else ""
-                detail = f"  seen {fmt_ts(v.first_seen)}"
+                detail = f"  {italic(f'seen {fmt_ts(v.first_seen)}')}"
                 entry_lines.append([f"• {marker}{title} — {esc(v.channel_name)}{attempts}", detail])
-            block.extend(cap_entries(entry_lines, _INQUEUE_MAX_ENTRIES))
+            block.extend(blockquote(cap_entries(entry_lines, _INQUEUE_MAX_ENTRIES)))
             sections.append(block)
         if state.seen:
             footers.append(f"{len(state.seen)} videos seen since the poller started.")
@@ -388,30 +415,41 @@ async def cmd_inqueue(update: Update, context: CustomContext, user: User) -> Non
         problems.append("📥 Couldn't read the blocked-transcript list — check the logs.")
     else:
         if pending_transcripts:
-            header = f"Blocked transcripts — {len(pending_transcripts)}"
-            block = [f"📥 {bold(header)}", "Retrying automatically; nothing to do."]
+            block = [
+                _section_header("📥", "Blocked transcripts", str(len(pending_transcripts))),
+                # Outside the quote below: this is the section's standing instruction,
+                # not one of the entries.
+                "Retrying automatically; nothing to do.",
+            ]
             block.extend(
-                cap_entries(
-                    [
+                blockquote(
+                    cap_entries(
                         [
-                            f"• {video_link(t.video_title, t.video_id)} — {esc(t.channel_name)}",
-                            f"  queued {fmt_ts(t.queued_at)}",
-                        ]
-                        for t in pending_transcripts
-                    ],
-                    _INQUEUE_MAX_ENTRIES,
+                            [
+                                f"• {video_link(t.video_title, t.video_id)} — "
+                                f"{esc(t.channel_name)}",
+                                f"  {italic(f'queued {fmt_ts(t.queued_at)}')}",
+                            ]
+                            for t in pending_transcripts
+                        ],
+                        _INQUEUE_MAX_ENTRIES,
+                    ),
                 ),
             )
             sections.append(block)
 
     # Empty state (UH35): say the useful thing once instead of printing three headers
     # whose only content is the word "empty".
-    if not sections and not problems:
+    blocks = [*sections, *([p] for p in problems)]
+    if not blocks:
         lines = ["✅ Nothing queued — everything's up to date."]
     else:
-        lines = ["📊 " + bold("Queue status")]
-        for block in [*sections, *([p] for p in problems)]:
-            lines.append("")  # one blank line between blocks, never two
+        # "Queue status" earns its place only as an umbrella over several sections. Above
+        # a lone "⏳ POLLER — 1 waiting to upload" it's a second title for one thing.
+        lines = ["📊 " + bold("Queue status")] if len(blocks) > 1 else []
+        for block in blocks:
+            if lines:
+                lines.append("")  # one blank line between blocks, never two
             lines.extend(block)
     if footers:
         lines.append("")
@@ -451,6 +489,14 @@ async def _project_names(context: CustomContext) -> dict[str, str]:
     return {p["uuid"]: p["name"] for p in projects or []}
 
 
+def _channel_link(ch: Channel) -> str:
+    """A watched channel, tappable — which is what lets the listing drop the `(@handle)`
+    suffix that doubled every line's width. Prefers the canonical /channel/ URL; the
+    handle is only a fallback for an entry whose id hasn't been backfilled yet."""
+    path = f"channel/{ch.channel_id}" if ch.channel_id else ch.handle
+    return link(ch.name, f"https://www.youtube.com/{path}")
+
+
 def _fmt_interval(seconds: float) -> str:
     minutes = max(1, round(seconds / 60))
     return f"{minutes // 60}h" if minutes >= 60 and minutes % 60 == 0 else f"{minutes} min"
@@ -486,18 +532,28 @@ async def cmd_subscribed(update: Update, context: CustomContext, user: User) -> 
 
     names = await _project_names(context)
     default = config.poller.auto_transcript_project
+    default_label = _project_label(default, names) if default else None
 
-    lines = [f"📺 {bold(f'Watching {len(channels)} channel(s)')}", ""]
+    # Grouped by the *resolved* label, not the raw setting: one channel routed by uuid
+    # and another by name to the same project belong under one heading, not under two
+    # that happen to name the same place.
+    groups: dict[str | None, list[Channel]] = defaultdict(list)
     for ch in channels:
-        lines.append(f"• {esc(ch.name)} ({esc(ch.handle)})")
-        if ch.project:
-            lines.append(f"  → {esc(_project_label(ch.project, names))}")
-        elif default:
-            lines.append(f"  → {esc(_project_label(default, names))} (default)")
-        else:
-            lines.append("  → no project")
+        setting = ch.project or default
+        groups[_project_label(setting, names) if setting else None].append(ch)
 
-    lines.append("")
+    plural = "" if len(channels) == 1 else "s"
+    lines = [f"📺 {bold(f'Watching {len(channels)} channel{plural}')}", ""]
+    # Biggest group first, alphabetical within a tie, unrouted channels last — they're
+    # the ones needing attention, and last is where a reader stops.
+    ordered = sorted(groups.items(), key=lambda g: (g[0] is None, -len(g[1]), g[0] or ""))
+    for label, members in ordered:
+        heading = "No project" if label is None else label
+        if label is not None and label == default_label:
+            heading += " (default)"
+        lines.append(bold(f"{heading} — {len(members)}"))
+        lines.extend(f"• {_channel_link(ch)}" for ch in members)
+        lines.append("")
     if default:
         lines.append(
             f"Checked every {_fmt_interval(config.poller.poll_interval)}; "
@@ -510,7 +566,13 @@ async def cmd_subscribed(update: Update, context: CustomContext, user: User) -> 
             "picked up.",
         )
 
-    await update.message.reply_text(cap_message("\n".join(lines)), parse_mode=PARSE_MODE)
+    await update.message.reply_text(
+        cap_message("\n".join(lines)),
+        parse_mode=PARSE_MODE,
+        # The channel names are links now, so without this Telegram hangs a preview
+        # card for whichever channel happens to be listed first under the listing.
+        link_preview_options=NO_PREVIEW,
+    )
 
 
 def _with_subscribe_default(
