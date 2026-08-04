@@ -4,6 +4,7 @@ from collections.abc import Awaitable, Callable, Coroutine
 from datetime import UTC, datetime
 from functools import wraps
 from typing import Any, TypedDict
+from urllib.parse import quote
 
 from curl_cffi.requests.exceptions import RequestException
 from telegram import BotCommand, InlineKeyboardButton, InlineKeyboardMarkup, Update, User
@@ -392,8 +393,7 @@ async def cmd_inqueue(update: Update, context: CustomContext, user: User) -> Non
         problems.append("⏳ Couldn't read the poller's state — check the logs.")
     else:
         if state.pending:
-            summary = f"{len(state.pending)} waiting to upload"
-            block = [_section_header("⏳", "Poller", summary)]
+            block = [_section_header("⏳", "Poller", f"{len(state.pending)} waiting to upload")]
             entry_lines = []
             for v in state.pending:
                 marker = _STUCK_MARKER if v.upload_attempts else ""
@@ -468,8 +468,15 @@ _SUBSCRIBE_DEFAULT = "default"  # picker choice: inherit AUTO_TRANSCRIPT_PROJECT
 
 def _project_label(value: str, names: dict[str, str]) -> str:
     """Channel entries and AUTO_TRANSCRIPT_PROJECT may hold either a project name or a
-    uuid — show the name where we can resolve one, the raw value otherwise."""
-    return names.get(value, value)
+    uuid — show the name where we can resolve one, the raw value otherwise.
+
+    Name matching is case-insensitive, mirroring the poller's `_resolve_project`: two
+    channels configured as "investments" and "Investments" resolve to the same project
+    there, so they must land under the same heading here too."""
+    if value in names:
+        return names[value]
+    target = value.lower()
+    return next((name for name in names.values() if name.lower() == target), value)
 
 
 async def _project_names(context: CustomContext) -> dict[str, str]:
@@ -493,7 +500,7 @@ def _channel_link(ch: Channel) -> str:
     """A watched channel, tappable — which is what lets the listing drop the `(@handle)`
     suffix that doubled every line's width. Prefers the canonical /channel/ URL; the
     handle is only a fallback for an entry whose id hasn't been backfilled yet."""
-    path = f"channel/{ch.channel_id}" if ch.channel_id else ch.handle
+    path = f"channel/{ch.channel_id}" if ch.channel_id else quote(ch.handle, safe="@")
     return link(ch.name, f"https://www.youtube.com/{path}")
 
 
