@@ -33,6 +33,7 @@ _TRUNCATION_NOTE = "\n… (truncated)"
 TITLE_LIMIT = 70  # video titles are frequently 100+ chars and wrap into a wall of text
 
 _TAG_RE = re.compile(r"<[^>]*>")
+_TAG_NAME_RE = re.compile(r"<(/?)([a-zA-Z][\w-]*)")
 
 
 def esc(text: str) -> str:
@@ -58,6 +59,24 @@ def code(text: str) -> str:
 
 def link(text: str, url: str) -> str:
     return f'<a href="{html.escape(url, quote=True)}">{esc(text)}</a>'
+
+
+def blockquote(lines: list[str]) -> list[str]:
+    """Wrap already-formatted lines in Telegram's blockquote, which draws them indented
+    behind a vertical rule.
+
+    This is the only real hierarchy lever the Bot API offers: HTML parse mode has no
+    font sizes, so a section header can't be made *bigger* than its entries — it can
+    only be made structurally superior to them by subordinating what follows. Bold
+    alone loses to a blue link one line below it.
+
+    Takes and returns whole lines because callers assemble messages line by line and
+    `cap_message` truncates the same way; the open tag therefore has to live on the
+    first line and the close on the last, never on lines of their own."""
+    if not lines:
+        return []
+    opened = [f"<blockquote>{lines[0]}", *lines[1:]]
+    return [*opened[:-1], f"{opened[-1]}</blockquote>"]
 
 
 def video_link(title: str, video_id: str | None, *, limit: int = TITLE_LIMIT) -> str:
@@ -96,6 +115,30 @@ def _strip_tags(markup: str) -> str:
     return html.unescape(_TAG_RE.sub("", markup))
 
 
+def _unclosed_tags(markup: str) -> str:
+    """The closing tags needed to make `markup` well-formed again, outermost last.
+
+    Line-oriented truncation is safe only while every tag opens and closes on the same
+    line. `blockquote()` breaks that — it spans a whole section — so dropping trailing
+    lines can strand an open `<blockquote>`, and Telegram rejects the *entire* message
+    for one unbalanced tag. Rather than forbid multi-line markup, close whatever is
+    still open at the cut.
+
+    Only ever sees markup this module produced, so a plain stack is enough: no void
+    elements, no attributes containing `<`, no interleaved tags."""
+    stack: list[str] = []
+    for match in _TAG_NAME_RE.finditer(markup):
+        is_closing, name = match.group(1), match.group(2).lower()
+        if not is_closing:
+            stack.append(name)
+        elif name in stack:
+            # Discard everything opened inside the tag being closed; unbalanced input
+            # would otherwise leave phantom entries pinned at the bottom of the stack.
+            while stack.pop() != name:
+                pass
+    return "".join(f"</{name}>" for name in reversed(stack))
+
+
 def _escape_prefix(text: str, budget: int) -> str:
     """Escape as much raw text as fits without ever splitting an HTML entity."""
     parts: list[str] = []
@@ -122,7 +165,9 @@ def cap_message(text: str) -> str:
 
     Drops whole lines from the end rather than slicing at a byte offset: under HTML a
     cut through `<a href="...">` makes Telegram reject the *entire* message, so a
-    naive slice trades "truncated but readable" for "nothing arrives at all"."""
+    naive slice trades "truncated but readable" for "nothing arrives at all". Any tag
+    still open at the cut (a multi-line `blockquote`) is closed rather than stranded,
+    for the same reason."""
     if len(text) <= TELEGRAM_MAX_MESSAGE_LENGTH:
         return text
 
@@ -136,11 +181,18 @@ def cap_message(text: str) -> str:
         kept.append(line)
         used += extra
 
-    if not kept:
-        # Degenerate case: even the first line overflows on its own. Strip our tags,
-        # then escape raw characters into the remaining budget so no entity is severed.
-        return _escape_prefix(_strip_tags(text), budget) + _TRUNCATION_NOTE
-    return "\n".join(kept) + _TRUNCATION_NOTE
+    # The closing tags are themselves part of the message, so they have to come out of
+    # the same budget — drop further lines until both fit.
+    while kept:
+        body = "\n".join(kept)
+        closers = _unclosed_tags(body)
+        if len(body) + len(closers) <= budget:
+            return body + closers + _TRUNCATION_NOTE
+        kept.pop()
+
+    # Degenerate case: even the first line overflows on its own. Strip our tags, then
+    # escape raw characters into the remaining budget so no entity is severed.
+    return _escape_prefix(_strip_tags(text), budget) + _TRUNCATION_NOTE
 
 
 def fmt_ts(iso: str) -> str:

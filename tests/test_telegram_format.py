@@ -6,6 +6,7 @@ from knowledger.history import UploadRecord, load_history
 from knowledger.persistence import atomic_write_json
 from knowledger.telegram_format import (
     TELEGRAM_MAX_MESSAGE_LENGTH,
+    blockquote,
     cap_entries,
     cap_message,
     esc,
@@ -81,6 +82,46 @@ def test_cap_message_never_splits_an_entity_in_one_enormous_line() -> None:
     assert len(capped) <= TELEGRAM_MAX_MESSAGE_LENGTH
     assert escaped_prefix.endswith("&amp;")
     assert escaped_prefix.count("&") == escaped_prefix.count("&amp;")
+
+
+def test_blockquote_spans_the_whole_block_rather_than_wrapping_each_line() -> None:
+    assert blockquote(["a", "b", "c"]) == ["<blockquote>a", "b", "c</blockquote>"]
+    assert blockquote(["only"]) == ["<blockquote>only</blockquote>"]
+    assert blockquote([]) == []
+
+
+def test_cap_message_closes_a_blockquote_that_truncation_cut_open() -> None:
+    """Line-dropping used to be safe only because every tag opened and closed on one
+    line. A section-spanning blockquote breaks that, and Telegram rejects the entire
+    message for one unbalanced tag — the exact "nothing arrives at all" failure the
+    line-oriented truncation exists to avoid."""
+    text = "\n".join(blockquote([f"• entry {i}" for i in range(500)]))
+    assert len(text) > TELEGRAM_MAX_MESSAGE_LENGTH
+
+    capped = cap_message(text)
+
+    assert len(capped) <= TELEGRAM_MAX_MESSAGE_LENGTH
+    assert capped.count("<blockquote>") == capped.count("</blockquote>") == 1
+    # Closed at the cut, before the trailer — not left hanging open.
+    assert capped.endswith("</blockquote>\n… (truncated)")
+
+
+def test_cap_message_closes_a_blockquote_of_links_and_italics_that_truncation_cut_open() -> None:
+    """The bare-blockquote test above never exercises the closer against interleaved
+    `<a>`/`<i>` tags — the actual /inqueue shape. Regression coverage for the real
+    markup, not a simplified stand-in."""
+    entries = [
+        f'<a href="https://youtu.be/v{i}">Video {i}</a> — <i>seen just now</i>' for i in range(500)
+    ]
+    text = "\n".join(blockquote(entries))
+    assert len(text) > TELEGRAM_MAX_MESSAGE_LENGTH
+
+    capped = cap_message(text)
+
+    assert len(capped) <= TELEGRAM_MAX_MESSAGE_LENGTH
+    assert capped.count("<blockquote>") == capped.count("</blockquote>") == 1
+    assert capped.count("<a ") == capped.count("</a>")
+    assert capped.count("<i>") == capped.count("</i>")
 
 
 def test_cap_entries_reports_what_it_dropped() -> None:

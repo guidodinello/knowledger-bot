@@ -161,12 +161,63 @@ def test_subscribed_lists_channels_with_resolved_project_names(tmp_path: Path) -
     asyncio.run(cmd_subscribed(FakeUpdate(message), FakeContext(config)))  # type: ignore[arg-type]
 
     text = message.replies[0]
-    assert "Watching 2 channel(s)" in text
-    assert "• José Luis Cava (@Cava)" in text
-    assert "→ Investments (default)" in text  # inherits AUTO_TRANSCRIPT_PROJECT, shown by name
-    assert "• Dr. La Rosa (@Rosa)" in text
-    assert "→ Exercise" in text  # per-channel override, uuid resolved to its name
+    assert "Watching 2 channels" in text
+    # One heading per project, with its channels under it — rather than repeating the
+    # destination on its own line beneath every single channel.
+    assert "<b>Investments (default) — 1</b>" in text  # AUTO_TRANSCRIPT_PROJECT, by name
+    assert "<b>Exercise — 1</b>" in text  # per-channel override, uuid resolved to its name
+    # Names are links, which is what lets the listing drop the "(@handle)" suffix.
+    assert '• <a href="https://www.youtube.com/channel/UC1">José Luis Cava</a>' in text
+    assert '• <a href="https://www.youtube.com/channel/UC2">Dr. La Rosa</a>' in text
+    assert "(@Cava)" not in text
     assert "Checked every 1h" in text
+
+
+def test_subscribed_groups_channels_sharing_a_project_however_it_was_configured(
+    tmp_path: Path,
+) -> None:
+    """A project named by uuid on one channel and by name on another is one project —
+    grouping on the raw setting would file them under two identical-looking headings."""
+    config = _config(tmp_path, auto_transcript_project="inv-uuid")
+    _write_channels(
+        config,
+        [
+            {"handle": "@a", "name": "A", "channel_id": "UC1", "project": "gym-uuid"},
+            {"handle": "@b", "name": "B", "channel_id": "UC2", "project": "Exercise"},
+            {"handle": "@c", "name": "C", "channel_id": "UC3"},  # inherits the default
+        ],
+    )
+    message = FakeMessage()
+
+    asyncio.run(cmd_subscribed(FakeUpdate(message), FakeContext(config)))  # type: ignore[arg-type]
+
+    text = message.replies[0]
+    assert "<b>Exercise — 2</b>" in text
+    assert "<b>Investments (default) — 1</b>" in text
+    # Biggest group first, so the largest destination leads.
+    assert text.index("Exercise — 2") < text.index("Investments (default) — 1")
+
+
+def test_subscribed_lists_unrouted_channels_last_under_their_own_heading(
+    tmp_path: Path,
+) -> None:
+    """With no default configured, a channel without an override goes nowhere. It's the
+    entry needing attention, so it sorts last — where a reader stops."""
+    config = _config(tmp_path)  # no auto_transcript_project
+    _write_channels(
+        config,
+        [
+            {"handle": "@a", "name": "A", "channel_id": "UC1"},
+            {"handle": "@b", "name": "B", "channel_id": "UC2", "project": "gym-uuid"},
+        ],
+    )
+    message = FakeMessage()
+
+    asyncio.run(cmd_subscribed(FakeUpdate(message), FakeContext(config)))  # type: ignore[arg-type]
+
+    text = message.replies[0]
+    assert "<b>No project — 1</b>" in text
+    assert text.index("Exercise — 1") < text.index("No project — 1")
 
 
 def test_subscribed_warns_when_auto_upload_is_off(tmp_path: Path) -> None:
@@ -207,8 +258,9 @@ def test_subscribed_survives_an_unusable_project_list(
 
     asyncio.run(cmd_subscribed(FakeUpdate(message), context))  # type: ignore[arg-type]
 
-    assert "• Cava (@Cava)" in message.replies[0]
-    assert "→ inv-uuid (default)" in message.replies[0]
+    text = message.replies[0]
+    assert '<a href="https://www.youtube.com/channel/UC1">Cava</a>' in text
+    assert "<b>inv-uuid (default) — 1</b>" in text  # unresolvable, so the raw value stands in
 
 
 # --- /subscribe ----------------------------------------------------------------------

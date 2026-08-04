@@ -22,7 +22,7 @@ from curl_cffi.requests.exceptions import RequestException
 from defusedxml import ElementTree as ET
 from telegram.ext import Application
 
-from .claude_client import AuthError, ClaudeClient
+from .claude_client import AuthError, ClaudeClient, Project
 from .config import Config, ProxyConfig
 from .history import UploadRecord, record_upload
 from .logger import get_logger
@@ -370,8 +370,13 @@ async def sync_channels(
     return channels
 
 
-def _resolve_project(client: ClaudeClient, name_or_uuid: str) -> str | None:
-    """Resolve AUTO_TRANSCRIPT_PROJECT — accepts either a project uuid or a project name."""
+def _resolve_project(client: ClaudeClient, name_or_uuid: str) -> Project | None:
+    """Resolve AUTO_TRANSCRIPT_PROJECT — accepts either a project uuid or a project name.
+
+    Returns the whole project, not just its uuid: the configured value may be either
+    form, so it is not something to show a user. Echoing it verbatim is what put a bare
+    uuid in the "Auto-saved to …" notification, and the resolved name was right here
+    all along."""
     target = name_or_uuid.lower()
     match = next(
         (
@@ -384,7 +389,7 @@ def _resolve_project(client: ClaudeClient, name_or_uuid: str) -> str | None:
     if match is None:
         logger.error("Auto-transcript project '%s' not found in Claude account", name_or_uuid)
         return None
-    return match["uuid"]
+    return match
 
 
 def _enqueue_auth_fallback(
@@ -412,7 +417,7 @@ def _enqueue_auth_fallback(
 
 class TranscriptPoller:
     """Holds the poller's stable dependencies for its whole run — replaces threading
-    app/config/client/queue/channels/state/project_name through every call as
+    app/config/client/queue/channels/state/default_project through every call as
     positional arguments."""
 
     def __init__(
@@ -423,7 +428,7 @@ class TranscriptPoller:
         queue: Queue,
         channels: list[Channel],
         state: PollerState,
-        project_name: str,
+        default_project: str,
     ) -> None:
         self._app = app
         self._config = config
@@ -432,18 +437,20 @@ class TranscriptPoller:
         self._service = TranscriptUploadService(client)
         self._channels = channels
         self._state = state
-        self._project_name = project_name
+        # The raw AUTO_TRANSCRIPT_PROJECT setting: a name *or* a uuid, and never shown
+        # to a user — only fed to _resolve_project, which yields both.
+        self._default_project = default_project
 
     async def _process_video(
         self,
-        project_id: str,
-        project_name: str,
+        project: Project,
         video: PendingVideo,
         now: datetime,
     ) -> PendingVideo | None:
         """Fetch + upload one due video. Returns the (possibly updated) video to keep
         it in the pending list, or None once it's done — confirmed uploaded, or
         permanently given up on."""
+        project_id, project_name = project["uuid"], project["name"]
         try:
             transcript = await asyncio.to_thread(
                 fetch_transcript,
@@ -583,19 +590,19 @@ class TranscriptPoller:
         if not self._state.pending:
             return
 
-        # 2. Resolve each distinct configured project name once per tick (cached on
-        # the client), then map each channel to its resolved project id. A channel
-        # with no `project` override falls back to the global default.
-        channel_project_name = {
-            ch.channel_id: ch.project or self._project_name
+        # 2. Resolve each distinct configured project setting once per tick (cached on
+        # the client), then map each channel to its resolved project. A channel with no
+        # `project` override falls back to the global default.
+        channel_project_setting = {
+            ch.channel_id: ch.project or self._default_project
             for ch in self._channels
             if ch.channel_id
         }
         # The global default is always resolved, even when every channel overrides it —
         # it's the fallback for a pending video whose channel is no longer configured.
-        project_names = set(channel_project_name.values()) | {self._project_name}
+        settings = set(channel_project_setting.values()) | {self._default_project}
         try:
-            project_ids = await self._resolve_project_ids(project_names)
+            projects = await self._resolve_projects(settings)
         except AuthError:
             logger.warning("Auth error resolving projects; skipping processing this tick")
             if not self._state.auth_error_notified:
@@ -632,14 +639,14 @@ class TranscriptPoller:
             # A pending video whose channel has since been removed from channels.json
             # still gets uploaded, to the global default project — it was already
             # detected and paid for, and dropping it here would be a silent data loss.
-            project_name = channel_project_name.get(video.channel_id, self._project_name)
-            project_id = project_ids.get(project_name)
-            if project_id is None:
+            setting = channel_project_setting.get(video.channel_id, self._default_project)
+            project = projects.get(setting)
+            if project is None:
                 # Misconfigured project name (typo, wrong org) — leave it pending,
                 # don't drop it; _resolve_project already logged the error.
                 settled.append(video)
                 continue
-            result = await self._process_video(project_id, project_name, video, now)
+            result = await self._process_video(project, video, now)
             if result is not None:
                 settled.append(result)
             self._state.pending = settled + original_pending[i + 1 :]
@@ -647,14 +654,15 @@ class TranscriptPoller:
         self._state.pending = settled
         self._state.save()
 
-    async def _resolve_project_ids(self, project_names: set[str]) -> dict[str, str | None]:
-        """One _resolve_project call per distinct configured project name.
+    async def _resolve_projects(self, settings: set[str]) -> dict[str, Project | None]:
+        """One _resolve_project call per distinct configured project setting, keyed by
+        that setting so callers can look up by whatever channels.json holds.
         Each call hits the client's cached project list, so there's at most one
         Claude API round trip total per tick."""
         results = {}
-        for name in project_names:
+        for setting in settings:
             try:
-                results[name] = await asyncio.to_thread(_resolve_project, self._client, name)
+                results[setting] = await asyncio.to_thread(_resolve_project, self._client, setting)
             except AuthError:
                 raise  # let _tick() handle it
         return results
@@ -682,8 +690,8 @@ class TranscriptPoller:
 
 
 async def run_poller(app: Application, config: Config) -> None:
-    project_name = config.poller.auto_transcript_project
-    if not project_name:
+    default_project = config.poller.auto_transcript_project
+    if not default_project:
         logger.info("AUTO_TRANSCRIPT_PROJECT not set; poller disabled")
         return
 
@@ -712,5 +720,5 @@ async def run_poller(app: Application, config: Config) -> None:
             config.poller.channels_path,
         )
 
-    poller = TranscriptPoller(app, config, client, queue, channels, state, project_name)
+    poller = TranscriptPoller(app, config, client, queue, channels, state, default_project)
     await poller.run()

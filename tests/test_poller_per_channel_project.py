@@ -80,7 +80,7 @@ def _poller(
     client: FakeClaudeClient,
     channels: list[Channel],
     state: PollerState,
-    project_name: str = "Default",
+    default_project: str = "Default",
 ) -> TranscriptPoller:
     # Every tick re-reads channels_path (so /subscribe takes effect without a restart),
     # so the watch list has to exist on disk here — otherwise the default relative
@@ -94,7 +94,7 @@ def _poller(
         queue=Queue(path=tmp_path / "q.json"),
         channels=channels,
         state=state,
-        project_name=project_name,
+        default_project=default_project,
     )
 
 
@@ -131,6 +131,28 @@ def test_tick_routes_each_channels_video_to_its_own_project(tmp_path: Path) -> N
     assert state.pending == []
     project_ids_used = {project_id for project_id, _ in client.uploads}
     assert project_ids_used == {"default-id", "exercise-id"}
+
+
+def test_auto_saved_notification_names_the_project_rather_than_echoing_a_uuid(
+    tmp_path: Path,
+) -> None:
+    """AUTO_TRANSCRIPT_PROJECT and channels.json `project` both accept a uuid *or* a
+    name, so the configured string is not something to show a user. Echoing it verbatim
+    is what put a bare uuid in "Auto-saved to …"."""
+    uuid = "0199b13b-24ad-754e-8d9c-e11422466e56"
+    client = FakeClaudeClient([{"uuid": uuid, "name": "Investments"}])
+    channels = [Channel(handle="@a", name="A", channel_id="chan-a")]
+    state = PollerState(path=tmp_path / "state.json")
+    state.pending = [_old_video("chan-a", "va")]
+    poller = _poller(tmp_path, client, channels, state, default_project=uuid)
+
+    notify = AsyncMock()
+    with patch("knowledger.poller.notify", notify):
+        asyncio.run(poller._tick())
+
+    text = notify.call_args.args[2]
+    assert "Auto-saved to <b>Investments</b>" in text
+    assert uuid not in text
 
 
 def test_tick_leaves_video_pending_when_channel_project_is_misconfigured(
