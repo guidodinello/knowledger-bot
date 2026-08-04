@@ -111,8 +111,7 @@ def test_cap_message_closes_a_blockquote_of_links_and_italics_that_truncation_cu
     `<a>`/`<i>` tags — the actual /inqueue shape. Regression coverage for the real
     markup, not a simplified stand-in."""
     entries = [
-        f'<a href="https://youtu.be/v{i}">Video {i}</a> — <i>seen just now</i>'
-        for i in range(500)
+        f'<a href="https://youtu.be/v{i}">Video {i}</a> — <i>seen just now</i>' for i in range(500)
     ]
     text = "\n".join(blockquote(entries))
     assert len(text) > TELEGRAM_MAX_MESSAGE_LENGTH
