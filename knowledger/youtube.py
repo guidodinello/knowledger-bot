@@ -157,6 +157,12 @@ def fetch_video_metadata(url: str, proxy: ProxyConfig | None = None) -> VideoMet
     )
 
 
+def watch_url(video_id: str) -> str:
+    """The canonical watch URL for a video id — for callers that hold an id (a feed
+    entry, a queued retry) and need the URL form `fetch_video_metadata` takes."""
+    return f"{WATCH_URL}?v={video_id}"
+
+
 def sanitize_filename(text: str) -> str:
     return re.sub(r'[\\/:*?"<>|]', "", text).strip()
 
@@ -165,3 +171,15 @@ def build_doc_name(channel_name: str, title: str, upload_date: str | None) -> st
     """Build the canonical doc name: ``Youtube - {channel} - {title} - {date}``."""
     date_suffix = f" - {upload_date}" if upload_date else ""
     return f"Youtube - {sanitize_filename(channel_name)} - {sanitize_filename(title)}{date_suffix}"
+
+
+_DATE_SUFFIX_RE = re.compile(r" - \d{4}-\d{2}-\d{2}$")
+
+
+def has_date_suffix(doc_name: str) -> bool:
+    """Whether a doc name carries `build_doc_name`'s date suffix.
+
+    A name without one was built from metadata whose `upload_date` came back None —
+    the degraded form, and the reason two upload paths for the same video can disagree
+    on its name (see `pending_transcripts._resolve_doc_name`)."""
+    return _DATE_SUFFIX_RE.search(doc_name) is not None

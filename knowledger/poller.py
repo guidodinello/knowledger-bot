@@ -434,7 +434,7 @@ class TranscriptPoller:
         self._config = config
         self._client = client
         self._queue = queue
-        self._service = TranscriptUploadService(client)
+        self._service = TranscriptUploadService(client, config.storage.data_dir)
         self._channels = channels
         self._state = state
         # The raw AUTO_TRANSCRIPT_PROJECT setting: a name *or* a uuid, and never shown
@@ -481,7 +481,13 @@ class TranscriptPoller:
 
         file_name = build_doc_name(video.channel_name, video.title, video.published[:10])
 
-        outcome = await asyncio.to_thread(self._service.upload, project_id, transcript, file_name)
+        outcome = await asyncio.to_thread(
+            self._service.upload,
+            project_id,
+            transcript,
+            file_name,
+            video_id=video.video_id,
+        )
         match outcome:
             case Uploaded():
                 logger.info("Auto-uploaded %s to project %s", file_name, project_id)

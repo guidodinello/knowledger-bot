@@ -62,7 +62,7 @@ class QueueProcessor:
         config: Config,
         client: ClaudeClient,
     ) -> DrainResult:
-        service = TranscriptUploadService(client)
+        service = TranscriptUploadService(client, config.storage.data_dir)
         result = DrainResult()
         docs_by_project: dict[str, list[Doc]] = {}
         attempted: set[str] = set()
@@ -123,6 +123,7 @@ class QueueProcessor:
             entry.file_name,
             overwrite_doc_uuid=entry.overwrite_doc_uuid,
             docs=docs_by_project[entry.project_id],
+            video_id=entry.video_id,
         )
 
         match outcome:

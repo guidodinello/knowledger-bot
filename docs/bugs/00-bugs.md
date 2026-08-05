@@ -4,7 +4,7 @@
 
 ## Fixed
 
-Nine bugs found across the codebase, ranging from a user-visible message failure to silent data quality issues.
+Ten bugs found across the codebase, ranging from a user-visible message failure to silent data quality issues.
 
 | # | Severity | File | Status | Summary |
 |---|----------|------|--------|---------|
@@ -17,6 +17,7 @@ Nine bugs found across the codebase, ranging from a user-visible message failure
 | 8 | Medium | `knowledger/bot.py`, `knowledger/claude_client.py` | ✅ Fixed | [Auth errors before project selection skip the retry queue entirely](petition-queue-missing-project-context.md) |
 | 9 | Medium | `knowledger/bot.py` | ✅ Fixed | [Blocked transcript fetches are silently dropped, not retried](transcript-blocked-not-queued.md) |
 | 7 | Low | `knowledger/bot.py` | ✅ Fixed | [/inqueue filenames break Markdown rendering](inqueue-markdown-italics.md) |
+| 10 | Medium | `knowledger/upload_service.py`, `knowledger/pending_transcripts.py` | ✅ Fixed | [The same video is uploaded twice under two different doc names](duplicate-upload-divergent-doc-names.md) |
 
 ## Open
 

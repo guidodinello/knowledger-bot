@@ -872,6 +872,10 @@ async def handle_project_selection(update: Update, context: CustomContext, user:
 
     await query.edit_message_text("Checking the project for a copy…")
 
+    service = TranscriptUploadService(
+        context.bot_data["claude_client"],
+        context.bot_data["config"].storage.data_dir,
+    )
     docs: list[Doc] | None
     try:
         docs = await asyncio.to_thread(
@@ -892,8 +896,13 @@ async def handle_project_selection(update: Update, context: CustomContext, user:
         )
         return
 
+    # Identity-aware, so a copy stored under a different name — the poller's, built from
+    # the channel feed's publish date — is still recognised as this video (see
+    # TranscriptUploadService.find_existing) instead of being uploaded a second time.
     existing = (
-        next((d for d in docs if d["file_name"] == file_name), None) if docs is not None else None
+        service.find_existing(project_id, file_name, docs, video_id=metadata.video_id)
+        if docs is not None
+        else None
     )
     if existing:
         context.user_data[f"pending_{msg_id_str}"] = PendingUpload(
@@ -971,10 +980,16 @@ async def handle_project_selection(update: Update, context: CustomContext, user:
         return
 
     logger.info("Uploading %s to project %s", file_name, project_id)
-    service = TranscriptUploadService(context.bot_data["claude_client"])
     # `docs` was just fetched above (for the duplicate check) and no upload happens
     # here unless that check found nothing — reuse it instead of listing again.
-    outcome = await asyncio.to_thread(service.upload, project_id, transcript, file_name, docs=docs)
+    outcome = await asyncio.to_thread(
+        service.upload,
+        project_id,
+        transcript,
+        file_name,
+        docs=docs,
+        video_id=metadata.video_id,
+    )
 
     match outcome:
         case Uploaded():
@@ -1177,7 +1192,10 @@ async def handle_duplicate_choice(update: Update, context: CustomContext, user: 
     logger.info("Overwriting %s in project %s", pending["file_name"], pending["project_id"])
     await query.edit_message_text("Replacing the existing copy…")
 
-    service = TranscriptUploadService(context.bot_data["claude_client"])
+    service = TranscriptUploadService(
+        context.bot_data["claude_client"],
+        context.bot_data["config"].storage.data_dir,
+    )
     try:
         outcome = await asyncio.to_thread(
             service.upload,
@@ -1185,6 +1203,7 @@ async def handle_duplicate_choice(update: Update, context: CustomContext, user: 
             claimed.transcript,
             claimed.file_name,
             overwrite_doc_uuid=doc_uuid,
+            video_id=claimed.video_id,
         )
         match outcome:
             case Uploaded():

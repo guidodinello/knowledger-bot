@@ -16,7 +16,7 @@ from knowledger.config import (
     StorageSettings,
     TelegramSettings,
 )
-from knowledger.history import load_history
+from knowledger.history import UploadRecord, load_history, record_upload
 from knowledger.pending_transcripts import (
     PendingTranscript,
     PendingTranscriptStore,
@@ -26,6 +26,7 @@ from knowledger.persistence import CorruptDataError
 from knowledger.queue import Queue, QueueEntry
 from knowledger.telegram_format import NO_PREVIEW
 from knowledger.transcript import TranscriptTransportError, TranscriptUnavailable
+from knowledger.youtube import VideoMetadata
 
 
 class FakeBot:
@@ -92,6 +93,20 @@ def _entry(
         **overrides,
     }
     return PendingTranscript(**fields)
+
+
+@pytest.fixture(autouse=True)
+def _no_metadata_refetch():
+    """A drained entry whose queued doc name has no date suffix re-resolves the video's
+    metadata before uploading (see `_resolve_doc_name`). Tests must not reach YouTube
+    for that, so the default here is the "still can't reach it" branch — which keeps
+    the queued name, exactly what the tests below assert. Tests that care about the
+    re-resolution patch this with their own return value."""
+    with patch(
+        "knowledger.pending_transcripts.fetch_video_metadata",
+        side_effect=RequestException("no network in tests"),
+    ) as mock:
+        yield mock
 
 
 async def _drain(app, config, client, queue, store) -> None:
@@ -438,6 +453,126 @@ def test_notify_failure_does_not_abort_remaining_entries_in_batch(tmp_path: Path
     assert chat_id == 2
     assert "Saved" in text
     assert "Title" in text
+
+
+# --- doc-name re-resolution --------------------------------------------------------
+
+
+def _metadata(upload_date: str | None) -> VideoMetadata:
+    return VideoMetadata(
+        video_id="v1",
+        title="Bitcoin's Top Buyers Are Finally Capitulating",
+        channel_name="On-Chain Mind",
+        upload_date=upload_date,
+    )
+
+
+DATED_NAME = "Youtube - On-Chain Mind - Bitcoin's Top Buyers Are Finally Capitulating - 2026-08-04"
+DATELESS_NAME = "Youtube - On-Chain Mind - Bitcoin's Top Buyers Are Finally Capitulating"
+
+
+def test_dateless_name_is_re_resolved_before_upload(tmp_path: Path, _no_metadata_refetch) -> None:
+    """The entry was named while YouTube was blocking this bot, so the watch page — the
+    only source of the upload date — was unreachable and the name came out dateless. The
+    poller names the same video from the channel feed and always has a date, so the two
+    would store the same transcript twice. By retry time the block has lifted: re-resolve
+    and upload under the canonical name both paths agree on."""
+    store = PendingTranscriptStore(path=tmp_path / "p.json")
+    store.add(_entry("v1", file_name=DATELESS_NAME))
+    app = FakeTelegramApp()
+    queue = Queue(path=tmp_path / "q.json")
+    client = FakeClaudeClient()
+    _no_metadata_refetch.side_effect = None
+    _no_metadata_refetch.return_value = _metadata("2026-08-04")
+
+    with patch("knowledger.pending_transcripts.fetch_transcript", return_value="transcript text"):
+        asyncio.run(_drain(app, _config(tmp_path), client, queue, store))
+
+    assert client.docs["p"] == [{"uuid": "u1", "file_name": DATED_NAME}]
+    assert load_history(tmp_path)[0].file_name == DATED_NAME
+
+
+def test_already_dated_name_is_not_re_resolved(tmp_path: Path, _no_metadata_refetch) -> None:
+    """Nothing to recover, so don't spend a request on it."""
+    store = PendingTranscriptStore(path=tmp_path / "p.json")
+    store.add(_entry("v1", file_name=DATED_NAME))
+    app = FakeTelegramApp()
+    queue = Queue(path=tmp_path / "q.json")
+    client = FakeClaudeClient()
+
+    with patch("knowledger.pending_transcripts.fetch_transcript", return_value="transcript text"):
+        asyncio.run(_drain(app, _config(tmp_path), client, queue, store))
+
+    assert _no_metadata_refetch.call_count == 0
+    assert client.docs["p"] == [{"uuid": "u1", "file_name": DATED_NAME}]
+
+
+def test_re_resolution_failure_keeps_the_queued_name(tmp_path: Path) -> None:
+    """Still blocked at retry time: upload under the name we already have rather than
+    losing the transcript over a cosmetic detail. The video-id duplicate check still
+    protects against a second copy."""
+    store = PendingTranscriptStore(path=tmp_path / "p.json")
+    store.add(_entry("v1", file_name=DATELESS_NAME))
+    app = FakeTelegramApp()
+    queue = Queue(path=tmp_path / "q.json")
+    client = FakeClaudeClient()
+
+    with patch("knowledger.pending_transcripts.fetch_transcript", return_value="transcript text"):
+        asyncio.run(_drain(app, _config(tmp_path), client, queue, store))
+
+    assert client.docs["p"] == [{"uuid": "u1", "file_name": DATELESS_NAME}]
+
+
+def test_poller_upload_of_the_same_video_is_recognised(tmp_path: Path) -> None:
+    """The poller got there first and stored the video under its own (dated) name. The
+    retry must recognise that as this video and drop the entry, not add a second copy
+    under the dateless name it is still carrying."""
+    store = PendingTranscriptStore(path=tmp_path / "p.json")
+    store.add(_entry("v1", file_name=DATELESS_NAME))
+    app = FakeTelegramApp()
+    queue = Queue(path=tmp_path / "q.json")
+    client = FakeClaudeClient()
+    client.docs["p"] = [{"uuid": "from-poller", "file_name": DATED_NAME}]
+    record_upload(
+        tmp_path,
+        UploadRecord(
+            project_id="p",
+            file_name=DATED_NAME,
+            video_title="Title",
+            channel_name="Ch",
+            uploaded_at="2026-08-05T08:32:00+00:00",
+            video_id="v1",
+        ),
+    )
+
+    with patch("knowledger.pending_transcripts.fetch_transcript", return_value="transcript text"):
+        asyncio.run(_drain(app, _config(tmp_path), client, queue, store))
+
+    assert store.load() == []
+    assert client.upload_calls == 0
+
+
+def test_re_resolved_name_is_used_for_the_auth_fallback_entry(tmp_path: Path) -> None:
+    """A retry that succeeds on the transcript but hits an expired token hands off to
+    petition_queue.json — with the corrected name, so /refresh doesn't reintroduce the
+    duplicate the re-resolution just avoided."""
+    store = PendingTranscriptStore(path=tmp_path / "p.json")
+    store.add(_entry("v1", file_name=DATELESS_NAME))
+    app = FakeTelegramApp()
+    queue = Queue(path=tmp_path / "q.json")
+    client = FakeClaudeClient()
+    client.fail_auth_times = 1
+
+    with (
+        patch("knowledger.pending_transcripts.fetch_transcript", return_value="transcript text"),
+        patch(
+            "knowledger.pending_transcripts.fetch_video_metadata",
+            return_value=_metadata("2026-08-04"),
+        ),
+    ):
+        asyncio.run(_drain(app, _config(tmp_path), client, queue, store))
+
+    assert [e.file_name for e in queue.peek()] == [DATED_NAME]
 
 
 if __name__ == "__main__":
