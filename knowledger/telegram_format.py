@@ -139,43 +139,68 @@ def _unclosed_tags(markup: str) -> str:
     return "".join(f"</{name}>" for name in reversed(stack))
 
 
+def tg_len(text: str) -> int:
+    """Length as Telegram counts it: UTF-16 code units, not Python code points.
+
+    Every astral-plane character is one Python character but two UTF-16 units, so
+    `len()` undercounts any message carrying emoji — and the bot's section headers are
+    exactly that (`📊 🔁 ⏳ 📥`, plus a `🛑` per stuck entry in /inqueue). A message
+    that passes a `len()` check at just under 4096 is still rejected by the API as too
+    long, which is the precise failure `cap_message` exists to prevent."""
+    return len(text) + sum(1 for char in text if ord(char) > 0xFFFF)
+
+
+def _tg_prefix(text: str, budget: int) -> str:
+    """The longest prefix of `text` fitting in `budget` UTF-16 units. Slicing a Python
+    string can't split a surrogate pair (it indexes code points), so every prefix is
+    itself well-formed — only the *cost* of each character has to be counted correctly."""
+    used = 0
+    for i, char in enumerate(text):
+        cost = 2 if ord(char) > 0xFFFF else 1
+        if used + cost > budget:
+            return text[:i]
+        used += cost
+    return text
+
+
 def _escape_prefix(text: str, budget: int) -> str:
     """Escape as much raw text as fits without ever splitting an HTML entity."""
     parts: list[str] = []
     used = 0
     for char in text:
         escaped = esc(char)
-        if used + len(escaped) > budget:
+        if used + tg_len(escaped) > budget:
             break
         parts.append(escaped)
-        used += len(escaped)
+        used += tg_len(escaped)
     return "".join(parts)
 
 
 def cap_plain_message(text: str) -> str:
     """Fit unparsed text inside Telegram's limit without HTML transformations."""
-    if len(text) <= TELEGRAM_MAX_MESSAGE_LENGTH:
+    if tg_len(text) <= TELEGRAM_MAX_MESSAGE_LENGTH:
         return text
-    budget = TELEGRAM_MAX_MESSAGE_LENGTH - len(_TRUNCATION_NOTE)
-    return text[:budget] + _TRUNCATION_NOTE
+    budget = TELEGRAM_MAX_MESSAGE_LENGTH - tg_len(_TRUNCATION_NOTE)
+    return _tg_prefix(text, budget) + _TRUNCATION_NOTE
 
 
 def cap_message(text: str) -> str:
-    """Fit an HTML message inside Telegram's hard 4096-character limit.
+    """Fit an HTML message inside Telegram's hard 4096-unit limit (see `tg_len` for
+    what a unit is).
 
     Drops whole lines from the end rather than slicing at a byte offset: under HTML a
     cut through `<a href="...">` makes Telegram reject the *entire* message, so a
     naive slice trades "truncated but readable" for "nothing arrives at all". Any tag
     still open at the cut (a multi-line `blockquote`) is closed rather than stranded,
     for the same reason."""
-    if len(text) <= TELEGRAM_MAX_MESSAGE_LENGTH:
+    if tg_len(text) <= TELEGRAM_MAX_MESSAGE_LENGTH:
         return text
 
-    budget = TELEGRAM_MAX_MESSAGE_LENGTH - len(_TRUNCATION_NOTE)
+    budget = TELEGRAM_MAX_MESSAGE_LENGTH - tg_len(_TRUNCATION_NOTE)
     kept: list[str] = []
     used = 0
     for line in text.split("\n"):
-        extra = len(line) + (1 if kept else 0)
+        extra = tg_len(line) + (1 if kept else 0)
         if used + extra > budget:
             break
         kept.append(line)
@@ -186,7 +211,7 @@ def cap_message(text: str) -> str:
     while kept:
         body = "\n".join(kept)
         closers = _unclosed_tags(body)
-        if len(body) + len(closers) <= budget:
+        if tg_len(body) + tg_len(closers) <= budget:
             return body + closers + _TRUNCATION_NOTE
         kept.pop()
 

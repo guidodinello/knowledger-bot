@@ -505,8 +505,15 @@ async def _project_names(context: CustomContext) -> dict[str, str]:
 def _channel_link(ch: Channel) -> str:
     """A watched channel, tappable — which is what lets the listing drop the `(@handle)`
     suffix that doubled every line's width. Prefers the canonical /channel/ URL; the
-    handle is only a fallback for an entry whose id hasn't been backfilled yet."""
-    path = f"channel/{ch.channel_id}" if ch.channel_id else quote(ch.handle, safe="@")
+    handle is only a fallback for an entry whose id hasn't been backfilled yet.
+
+    `safe="@/"` and not `safe="@"`: quote()'s `safe` *replaces* its `"/"` default rather
+    than adding to it, and a handle is not always an `@name` — `extract_channel_handle`
+    also yields the legacy `channel/UC…`, `c/Name` and `user/Name` forms, which
+    `resolve_channel_id` stores verbatim. Percent-encoding that separator produces
+    `youtube.com/channel%2FUC…`, a 404 — and on an un-backfilled entry this link is the
+    only identity the channel has in the listing."""
+    path = f"channel/{ch.channel_id}" if ch.channel_id else quote(ch.handle, safe="@/")
     return link(ch.name, f"https://www.youtube.com/{path}")
 
 

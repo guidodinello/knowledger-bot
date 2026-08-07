@@ -173,6 +173,34 @@ def test_subscribed_lists_channels_with_resolved_project_names(tmp_path: Path) -
     assert "Checked every 1h" in text
 
 
+def test_subscribed_links_a_legacy_handle_without_encoding_its_separator(
+    tmp_path: Path,
+) -> None:
+    """An entry with no backfilled channel_id falls back to linking its handle, and a
+    handle is not always an `@name` — `extract_channel_handle` also yields the legacy
+    `channel/UC…`, `c/Name` and `user/Name` forms. quote()'s `safe` replaces its "/"
+    default rather than adding to it, so percent-encoding that separator produced a
+    404, and on an un-backfilled entry this link is the channel's only identity here."""
+    config = _config(tmp_path, auto_transcript_project="inv-uuid")
+    _write_channels(
+        config,
+        [
+            {"handle": "channel/UCabc123", "name": "Legacy Id"},
+            {"handle": "user/SomeName", "name": "Legacy User"},
+            {"handle": "@Modern", "name": "Modern Handle"},
+        ],
+    )
+    message = FakeMessage()
+
+    asyncio.run(cmd_subscribed(FakeUpdate(message), FakeContext(config)))  # type: ignore[arg-type]
+
+    text = message.replies[0]
+    assert "%2F" not in text
+    assert '"https://www.youtube.com/channel/UCabc123"' in text
+    assert '"https://www.youtube.com/user/SomeName"' in text
+    assert '"https://www.youtube.com/@Modern"' in text
+
+
 def test_subscribed_groups_channels_sharing_a_project_however_it_was_configured(
     tmp_path: Path,
 ) -> None:
