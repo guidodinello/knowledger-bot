@@ -12,10 +12,15 @@ CLI output all stay outside this module; callers translate the returned outcome 
 whatever their own adapter needs to say or do."""
 
 from dataclasses import dataclass
+from pathlib import Path
 
 from curl_cffi.requests.exceptions import RequestException
 
 from .claude_client import AuthError, ClaudeClient, Doc
+from .history import find_upload
+from .logger import get_logger
+
+logger = get_logger(__name__)
 
 
 @dataclass(frozen=True, slots=True)
@@ -51,8 +56,56 @@ UploadOutcome = Uploaded | AlreadyExists | DeferredForAuth | RetryPending
 
 
 class TranscriptUploadService:
-    def __init__(self, client: ClaudeClient) -> None:
+    def __init__(self, client: ClaudeClient, data_dir: Path | None = None) -> None:
         self._client = client
+        # Where upload_history.json lives, for identity-based duplicate detection (see
+        # find_existing). Optional: without it — cli.py, which has no DATA_DIR at all —
+        # duplicate detection is by doc name only, as it was before.
+        self._data_dir = data_dir
+
+    def find_existing(
+        self,
+        project_id: str,
+        file_name: str,
+        docs: list[Doc],
+        *,
+        video_id: str | None = None,
+    ) -> Doc | None:
+        """The doc in `docs` that already holds this video's transcript, or None.
+
+        A name match is the primary signal, but it is not sufficient on its own: the
+        name a path builds depends on metadata that path happened to resolve. The
+        interactive flow names a video from its watch page (`uploadDate`), and when
+        YouTube blocks that request — the same block that stalls the transcript fetch,
+        so the two go together — it falls back to a dateless
+        `Youtube - {channel} - {title}`. The poller, reading the channel feed, always
+        has a date and builds `... - {date}`. Same video, two names, so each path saw
+        the other's upload as absent and stored a second copy of the transcript.
+
+        So when the name doesn't match, fall back to the video id: if this video was
+        already uploaded to this project under some other name, and a doc with that
+        name is still there, that doc is the duplicate. Matching by id rather than by
+        a dateless-name heuristic matters for channels that publish under a recurring
+        title (a daily livestream), where the date is the *only* thing distinguishing
+        two genuinely different videos — collapsing it would silently drop one.
+        """
+        by_name = next((d for d in docs if d["file_name"] == file_name), None)
+        if by_name is not None or video_id is None or self._data_dir is None:
+            return by_name
+
+        record = find_upload(self._data_dir, project_id, video_id)
+        if record is None or record.file_name == file_name:
+            return None
+        renamed = next((d for d in docs if d["file_name"] == record.file_name), None)
+        if renamed is not None:
+            logger.info(
+                "Video %s is already in project %s as %r, not %r — skipping the upload",
+                video_id,
+                project_id,
+                record.file_name,
+                file_name,
+            )
+        return renamed
 
     def upload(
         self,
@@ -62,8 +115,12 @@ class TranscriptUploadService:
         *,
         overwrite_doc_uuid: str | None = None,
         docs: list[Doc] | None = None,
+        video_id: str | None = None,
     ) -> UploadOutcome:
         """Store `transcript` as `file_name` in `project_id`.
+
+        `video_id`, when given, widens duplicate detection beyond an exact name match
+        — see `find_existing`.
 
         If `overwrite_doc_uuid` is given, delete that doc first (skipping the delete,
         idempotently, if it's already gone — e.g. a prior attempt's confirmation was
@@ -95,12 +152,12 @@ class TranscriptUploadService:
                 except RequestException as e:
                     return RetryPending(step="deleting the old document", error=str(e))
                 docs[:] = [d for d in docs if d["uuid"] != overwrite_doc_uuid]
-            elif any(d["file_name"] == file_name for d in docs):
-                # The old doc is already gone AND a replacement with this name already
+            elif self.find_existing(project_id, file_name, docs, video_id=video_id) is not None:
+                # The old doc is already gone AND a replacement for this video already
                 # exists: a prior attempt landed and we just never saw the
                 # confirmation. Uploading again would create a duplicate.
                 return AlreadyExists()
-        elif any(d["file_name"] == file_name for d in docs):
+        elif self.find_existing(project_id, file_name, docs, video_id=video_id) is not None:
             return AlreadyExists()
 
         try:

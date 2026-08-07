@@ -1,6 +1,12 @@
 import pytest
 
-from knowledger.youtube import _extract_og_title, fetch_video_metadata
+from knowledger.youtube import (
+    _extract_og_title,
+    build_doc_name,
+    fetch_video_metadata,
+    is_undated_doc_name,
+    watch_url,
+)
 
 
 def test_extracts_title_in_document_order() -> None:
@@ -57,6 +63,41 @@ def test_incomplete_oembed_metadata_raises_value_error(
 
     with pytest.raises(ValueError, match="incomplete video metadata"):
         fetch_video_metadata("https://youtu.be/abc123")
+
+
+def test_doc_name_carries_a_date_suffix_when_the_upload_date_is_known() -> None:
+    dated = build_doc_name("On-Chain Mind", "Capitulating", "2026-08-04")
+    assert dated == "Youtube - On-Chain Mind - Capitulating - 2026-08-04"
+    assert not is_undated_doc_name(dated, "On-Chain Mind", "Capitulating")
+
+
+def test_doc_name_without_an_upload_date_is_detectable_as_degraded() -> None:
+    """The dateless form is what the interactive flow falls back to when it can\'t
+    reach the watch page — and what makes its name diverge from the poller\'s."""
+    undated = build_doc_name("On-Chain Mind", "Capitulating", None)
+    assert is_undated_doc_name(undated, "On-Chain Mind", "Capitulating")
+
+
+def test_a_title_that_itself_ends_in_a_date_is_still_read_as_undated() -> None:
+    """The case a trailing-date regex gets wrong. `Mercados - 2026-08-04` builds the
+    dateless `Youtube - Ch - Mercados - 2026-08-04`, indistinguishable by shape from a
+    dated name — and these are exactly the news/markets channels being watched, so
+    reading it as already-dated would skip the re-resolution it needs."""
+    title = "Mercados - 2026-08-04"
+    undated = build_doc_name("Ch", title, None)
+    assert undated == "Youtube - Ch - Mercados - 2026-08-04"
+    assert is_undated_doc_name(undated, "Ch", title)
+    assert not is_undated_doc_name(build_doc_name("Ch", title, "2026-08-05"), "Ch", title)
+
+
+def test_a_name_for_a_different_video_is_not_read_as_this_one_undated() -> None:
+    assert not is_undated_doc_name("Youtube - Ch - Other", "Ch", "Capitulating")
+
+
+def test_watch_url_round_trips_through_extract_video_id() -> None:
+    from knowledger.youtube import extract_video_id
+
+    assert extract_video_id(watch_url("BSFH8tFR2-k")) == "BSFH8tFR2-k"
 
 
 if __name__ == "__main__":

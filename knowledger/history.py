@@ -58,6 +58,29 @@ def record_upload(data_dir: Path, record: UploadRecord) -> None:
         logger.exception("Failed to record upload history for %s; continuing", record.file_name)
 
 
+def find_upload(data_dir: Path, project_id: str, video_id: str) -> UploadRecord | None:
+    """The most recent recorded upload of `video_id` into `project_id`, if any.
+
+    This is what lets duplicate detection key on the *video* rather than on a doc name
+    (see `upload_service.TranscriptUploadService.find_existing`): the name a path builds
+    depends on metadata that may have been unavailable when it built it, but the video
+    id is the same everywhere. Records written before `video_id` existed are skipped —
+    they carry None and can't identify anything.
+
+    Same best-effort policy as `record_upload`: a missing or unreadable history means
+    "nothing known", never a failed upload. Callers fall back to matching by name, which
+    is exactly the behaviour that predates this function."""
+    try:
+        records = load_history(data_dir)
+    except PersistenceError:
+        logger.exception("Could not read upload history to check for %s; continuing", video_id)
+        return None
+    return next(
+        (r for r in reversed(records) if r.project_id == project_id and r.video_id == video_id),
+        None,
+    )
+
+
 def load_history(data_dir: Path) -> list[UploadRecord]:
     """Missing file: empty history (valid — no uploads yet). Corrupt file: fails closed
     via CorruptDataError, same policy as poller_state.json / channels.json."""

@@ -62,7 +62,13 @@ from .upload_service import (
     TranscriptUploadService,
     Uploaded,
 )
-from .youtube import VideoMetadata, build_doc_name, extract_video_id, fetch_video_metadata
+from .youtube import (
+    VideoMetadata,
+    build_doc_name,
+    extract_video_id,
+    fetch_video_metadata,
+    is_undated_doc_name,
+)
 
 logger = get_logger(__name__)
 
@@ -499,8 +505,15 @@ async def _project_names(context: CustomContext) -> dict[str, str]:
 def _channel_link(ch: Channel) -> str:
     """A watched channel, tappable — which is what lets the listing drop the `(@handle)`
     suffix that doubled every line's width. Prefers the canonical /channel/ URL; the
-    handle is only a fallback for an entry whose id hasn't been backfilled yet."""
-    path = f"channel/{ch.channel_id}" if ch.channel_id else quote(ch.handle, safe="@")
+    handle is only a fallback for an entry whose id hasn't been backfilled yet.
+
+    `safe="@/"` and not `safe="@"`: quote()'s `safe` *replaces* its `"/"` default rather
+    than adding to it, and a handle is not always an `@name` — `extract_channel_handle`
+    also yields the legacy `channel/UC…`, `c/Name` and `user/Name` forms, which
+    `resolve_channel_id` stores verbatim. Percent-encoding that separator produces
+    `youtube.com/channel%2FUC…`, a 404 — and on an un-backfilled entry this link is the
+    only identity the channel has in the listing."""
+    path = f"channel/{ch.channel_id}" if ch.channel_id else quote(ch.handle, safe="@/")
     return link(ch.name, f"https://www.youtube.com/{path}")
 
 
@@ -872,6 +885,10 @@ async def handle_project_selection(update: Update, context: CustomContext, user:
 
     await query.edit_message_text("Checking the project for a copy…")
 
+    service = TranscriptUploadService(
+        context.bot_data["claude_client"],
+        context.bot_data["config"].storage.data_dir,
+    )
     docs: list[Doc] | None
     try:
         docs = await asyncio.to_thread(
@@ -892,13 +909,36 @@ async def handle_project_selection(update: Update, context: CustomContext, user:
         )
         return
 
+    # Identity-aware, so a copy stored under a different name — the poller's, built from
+    # the channel feed's publish date — is still recognised as this video (see
+    # TranscriptUploadService.find_existing) instead of being uploaded a second time.
     existing = (
-        next((d for d in docs if d["file_name"] == file_name), None) if docs is not None else None
+        service.find_existing(project_id, file_name, docs, video_id=metadata.video_id)
+        if docs is not None
+        else None
     )
     if existing:
+        # Overwrite replaces `existing` — so it must write the name that doc already
+        # carries, not the one computed above. The two are identical when `existing`
+        # was matched by name; they diverge only on an id match, and then the existing
+        # doc is very likely the poller's, named canonically from the feed's publish
+        # date, while this flow's name may be the dateless fallback. The one exception
+        # is the mirror case (a dateless doc from an earlier blocked attempt, and a
+        # real upload date in hand now): there the replacement is the chance to heal
+        # the name, so this flow's wins.
+        overwrite_name = (
+            file_name
+            if metadata.upload_date
+            and is_undated_doc_name(
+                existing["file_name"],
+                metadata.channel_name,
+                metadata.title,
+            )
+            else existing["file_name"]
+        )
         context.user_data[f"pending_{msg_id_str}"] = PendingUpload(
             project_id=project_id,
-            file_name=file_name,
+            file_name=overwrite_name,
             video_id=metadata.video_id,
             channel_name=metadata.channel_name,
             video_title=metadata.title,
@@ -971,10 +1011,16 @@ async def handle_project_selection(update: Update, context: CustomContext, user:
         return
 
     logger.info("Uploading %s to project %s", file_name, project_id)
-    service = TranscriptUploadService(context.bot_data["claude_client"])
     # `docs` was just fetched above (for the duplicate check) and no upload happens
     # here unless that check found nothing — reuse it instead of listing again.
-    outcome = await asyncio.to_thread(service.upload, project_id, transcript, file_name, docs=docs)
+    outcome = await asyncio.to_thread(
+        service.upload,
+        project_id,
+        transcript,
+        file_name,
+        docs=docs,
+        video_id=metadata.video_id,
+    )
 
     match outcome:
         case Uploaded():
@@ -1177,7 +1223,10 @@ async def handle_duplicate_choice(update: Update, context: CustomContext, user: 
     logger.info("Overwriting %s in project %s", pending["file_name"], pending["project_id"])
     await query.edit_message_text("Replacing the existing copy…")
 
-    service = TranscriptUploadService(context.bot_data["claude_client"])
+    service = TranscriptUploadService(
+        context.bot_data["claude_client"],
+        context.bot_data["config"].storage.data_dir,
+    )
     try:
         outcome = await asyncio.to_thread(
             service.upload,
@@ -1185,6 +1234,7 @@ async def handle_duplicate_choice(update: Update, context: CustomContext, user: 
             claimed.transcript,
             claimed.file_name,
             overwrite_doc_uuid=doc_uuid,
+            video_id=claimed.video_id,
         )
         match outcome:
             case Uploaded():

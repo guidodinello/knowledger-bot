@@ -9,8 +9,10 @@ from knowledger.telegram_format import (
     blockquote,
     cap_entries,
     cap_message,
+    cap_plain_message,
     esc,
     subject,
+    tg_len,
     truncate,
     video_link,
 )
@@ -122,6 +124,67 @@ def test_cap_message_closes_a_blockquote_of_links_and_italics_that_truncation_cu
     assert capped.count("<blockquote>") == capped.count("</blockquote>") == 1
     assert capped.count("<a ") == capped.count("</a>")
     assert capped.count("<i>") == capped.count("</i>")
+
+
+# --- UTF-16 accounting -------------------------------------------------------------
+#
+# Telegram measures its 4096 limit in UTF-16 code units. Every astral-plane character
+# is one Python character and two of those, so a len()-based check undercounts any
+# message carrying emoji — and the bot's section headers are exactly that. A message
+# passing at just under the cap was still rejected by the API as too long, which is
+# the failure cap_message exists to prevent.
+
+
+def test_tg_len_counts_astral_characters_as_two() -> None:
+    assert tg_len("abc") == 3
+    assert tg_len("\U0001f4ca") == 2  # 📊, one Python char
+    assert tg_len("\U0001f4ca ok") == 5
+    assert tg_len("é") == 1  # BMP, so one unit — not a bytes-length count
+
+
+def test_cap_message_caps_a_message_that_only_overflows_in_utf16_units() -> None:
+    """Under the cap by len(), over it by what Telegram counts. This is the whole bug:
+    the message sails past the check and the API rejects it."""
+    line = "\U0001f4ca" + "a" * 9  # 10 Python characters, 11 UTF-16 units
+    text = "\n".join([line] * 372)  # 4091 characters, 4463 units
+
+    assert len(text) < TELEGRAM_MAX_MESSAGE_LENGTH
+    assert tg_len(text) > TELEGRAM_MAX_MESSAGE_LENGTH
+
+    capped = cap_message(text)
+
+    assert tg_len(capped) <= TELEGRAM_MAX_MESSAGE_LENGTH
+    assert capped.endswith("… (truncated)")
+
+
+def test_cap_plain_message_caps_in_utf16_units_too() -> None:
+    text = "\U0001f4ca" * 3000
+
+    assert len(text) < TELEGRAM_MAX_MESSAGE_LENGTH
+    assert tg_len(text) > TELEGRAM_MAX_MESSAGE_LENGTH
+
+    capped = cap_plain_message(text)
+
+    assert tg_len(capped) <= TELEGRAM_MAX_MESSAGE_LENGTH
+
+
+def test_capping_never_splits_a_surrogate_pair() -> None:
+    """The prefix is sliced by Python code point, so an astral character is either
+    wholly kept or wholly dropped — a lone surrogate would be invalid UTF-8 on the
+    wire and rejected before the length ever mattered."""
+    capped = cap_plain_message("\U0001f4ca" * 3000)
+
+    assert capped.encode("utf-8")  # would raise on a lone surrogate
+    assert "\ud83d" not in capped
+
+
+def test_one_enormous_astral_line_still_fits_after_the_plain_text_fallback() -> None:
+    """The degenerate branch: a single line too long on its own, made of characters
+    that cost two units each."""
+    capped = cap_message("<b>" + "\U0001f4ca" * 5000 + "</b>")
+
+    assert tg_len(capped) <= TELEGRAM_MAX_MESSAGE_LENGTH
+    assert capped.encode("utf-8")
 
 
 def test_cap_entries_reports_what_it_dropped() -> None:

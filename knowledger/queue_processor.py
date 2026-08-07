@@ -62,7 +62,7 @@ class QueueProcessor:
         config: Config,
         client: ClaudeClient,
     ) -> DrainResult:
-        service = TranscriptUploadService(client)
+        service = TranscriptUploadService(client, config.storage.data_dir)
         result = DrainResult()
         docs_by_project: dict[str, list[Doc]] = {}
         attempted: set[str] = set()
@@ -116,6 +116,15 @@ class QueueProcessor:
                 )
                 return
 
+        # `entry.file_name` is uploaded as-is, unlike pending_transcripts._drain_one,
+        # which re-resolves a degraded (dateless) name before uploading. Deliberate:
+        # an entry is in *this* queue because Claude's token expired, not because
+        # YouTube blocked us, so its name carries no particular bias toward the
+        # dateless form — while a pending-transcript entry is queued by the very block
+        # that also denies the watch page its upload date. The entries that do arrive
+        # here from a YouTube-blocked origin are handed over by _drain_one, already
+        # re-resolved. Re-fetching metadata here would spend a round trip per entry on
+        # every /refresh drain, and these entries sit queued across many drains.
         outcome = await asyncio.to_thread(
             service.upload,
             entry.project_id,
@@ -123,6 +132,7 @@ class QueueProcessor:
             entry.file_name,
             overwrite_doc_uuid=entry.overwrite_doc_uuid,
             docs=docs_by_project[entry.project_id],
+            video_id=entry.video_id,
         )
 
         match outcome:

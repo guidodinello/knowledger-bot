@@ -36,6 +36,7 @@ from .upload_service import (
     TranscriptUploadService,
     Uploaded,
 )
+from .youtube import build_doc_name, fetch_video_metadata, is_undated_doc_name, watch_url
 
 logger = get_logger(__name__)
 
@@ -112,10 +113,49 @@ class PendingTranscriptStore:
         atomic_write_json(self.path, [asdict(e) for e in entries])
 
 
+def _resolve_doc_name(entry: PendingTranscript, config: Config) -> str:
+    """The doc name to upload this entry under, re-resolved if the queued one is the
+    degraded form.
+
+    An entry lands here because YouTube blocked the transcript request — and that same
+    block hits the watch page the interactive flow reads the upload date and the full
+    (untruncated) title from, so the name frozen into the entry is very often the
+    dateless `Youtube - {channel} - {title}` rather than the canonical
+    `... - {date}` one. The poller, naming the same video from the channel feed, always
+    has a date, so the two paths end up disagreeing about what the video is called.
+
+    By the time a retry succeeds the block has lifted, so re-resolve the metadata and
+    rebuild the name — the entry uploads as the canonical name both paths agree on.
+    Best effort: if the fetch fails again, keep the name we already have (the upload
+    still gets deduped by video id) rather than losing the retry over it."""
+    if not is_undated_doc_name(entry.file_name, entry.channel_name, entry.video_title):
+        return entry.file_name
+    try:
+        metadata = fetch_video_metadata(watch_url(entry.video_id), proxy=config.transcript.proxy)
+    except (RequestException, ValueError):
+        logger.warning(
+            "Could not re-resolve metadata for %s; keeping the queued doc name %r",
+            entry.video_id,
+            entry.file_name,
+            exc_info=True,
+        )
+        return entry.file_name
+    resolved = build_doc_name(metadata.channel_name, metadata.title, metadata.upload_date)
+    if resolved != entry.file_name:
+        logger.info(
+            "Re-resolved doc name for %s: %r -> %r",
+            entry.video_id,
+            entry.file_name,
+            resolved,
+        )
+    return resolved
+
+
 def _enqueue_auth_fallback(
     queue: Queue,
     entry: PendingTranscript,
     transcript: str,
+    file_name: str,
 ) -> QueueEntry | None:
     """The retried fetch succeeded but the upload itself is now auth-blocked — hand
     the now-in-hand transcript to the existing petition_queue mechanism (same
@@ -126,7 +166,7 @@ def _enqueue_auth_fallback(
     queue_entry = build_auth_fallback_entry(
         project_id=entry.project_id,
         video_id=entry.video_id,
-        file_name=entry.file_name,
+        file_name=file_name,
         transcript=transcript,
         chat_id=entry.chat_id,
         video_title=entry.video_title,
@@ -203,6 +243,8 @@ async def _drain_one(
         )
         return
 
+    file_name = await asyncio.to_thread(_resolve_doc_name, entry, config)
+
     # Cache doc listings per project for the whole batch — several pending entries
     # commonly share a project_id (the same block affecting several requests), and
     # TranscriptUploadService.upload() would otherwise re-list on every single call.
@@ -215,7 +257,7 @@ async def _drain_one(
             )
         except AuthError:
             store.remove(entry.project_id, entry.video_id)
-            added = _enqueue_auth_fallback(queue, entry, transcript)
+            added = _enqueue_auth_fallback(queue, entry, transcript, file_name)
             await _notify_chat(
                 app,
                 entry.chat_id,
@@ -238,23 +280,24 @@ async def _drain_one(
         service.upload,
         entry.project_id,
         transcript,
-        entry.file_name,
+        file_name,
         overwrite_doc_uuid=entry.overwrite_doc_uuid,
         docs=docs_by_project[entry.project_id],
+        video_id=entry.video_id,
     )
     match outcome:
         case Uploaded():
             store.remove(entry.project_id, entry.video_id)
             logger.info(
                 "Retried upload succeeded: %s -> project %s",
-                entry.file_name,
+                file_name,
                 entry.project_id,
             )
             record_upload(
                 config.storage.data_dir,
                 UploadRecord(
                     project_id=entry.project_id,
-                    file_name=entry.file_name,
+                    file_name=file_name,
                     video_title=entry.video_title,
                     channel_name=entry.channel_name,
                     uploaded_at=datetime.now(UTC).isoformat(),
@@ -269,11 +312,11 @@ async def _drain_one(
                 parse_mode=PARSE_MODE,
             )
         case AlreadyExists():
-            logger.info("Doc already exists, dropping pending transcript: %s", entry.file_name)
+            logger.info("Doc already exists, dropping pending transcript: %s", file_name)
             store.remove(entry.project_id, entry.video_id)
         case DeferredForAuth():
             store.remove(entry.project_id, entry.video_id)
-            added = _enqueue_auth_fallback(queue, entry, transcript)
+            added = _enqueue_auth_fallback(queue, entry, transcript, file_name)
             await _notify_chat(
                 app,
                 entry.chat_id,
@@ -286,7 +329,7 @@ async def _drain_one(
         case RetryPending(step=step, error=error):
             logger.warning(
                 "Retried upload failed for %s while %s: %s; will retry",
-                entry.file_name,
+                file_name,
                 step,
                 error,
             )
@@ -299,7 +342,7 @@ async def drain_pending_transcripts(
     queue: Queue,
     store: PendingTranscriptStore,
 ) -> None:
-    service = TranscriptUploadService(client)
+    service = TranscriptUploadService(client, config.storage.data_dir)
     docs_by_project: dict[str, list[Doc]] = {}
     for entry in store.load():
         await _drain_one(app, config, client, service, queue, store, entry, docs_by_project)

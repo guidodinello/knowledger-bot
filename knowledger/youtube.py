@@ -157,6 +157,12 @@ def fetch_video_metadata(url: str, proxy: ProxyConfig | None = None) -> VideoMet
     )
 
 
+def watch_url(video_id: str) -> str:
+    """The canonical watch URL for a video id — for callers that hold an id (a feed
+    entry, a queued retry) and need the URL form `fetch_video_metadata` takes."""
+    return f"{WATCH_URL}?v={video_id}"
+
+
 def sanitize_filename(text: str) -> str:
     return re.sub(r'[\\/:*?"<>|]', "", text).strip()
 
@@ -165,3 +171,18 @@ def build_doc_name(channel_name: str, title: str, upload_date: str | None) -> st
     """Build the canonical doc name: ``Youtube - {channel} - {title} - {date}``."""
     date_suffix = f" - {upload_date}" if upload_date else ""
     return f"Youtube - {sanitize_filename(channel_name)} - {sanitize_filename(title)}{date_suffix}"
+
+
+def is_undated_doc_name(doc_name: str, channel_name: str, title: str) -> bool:
+    """Whether `doc_name` is the dateless form `build_doc_name` falls back to for this
+    channel and title — the degraded name produced when `upload_date` came back None,
+    and the reason two upload paths for the same video can disagree on what to call it
+    (see `pending_transcripts._resolve_doc_name`).
+
+    Rebuilding the dateless name and comparing, rather than pattern-matching the doc
+    name for a trailing ` - YYYY-MM-DD`: a *title* can end in a date too. A video
+    called `Mercados - 2026-08-04` builds the dateless
+    `Youtube - Ch - Mercados - 2026-08-04`, which no regex can tell apart from a dated
+    name — and reading it as already-dated would skip the re-resolution that name
+    needs most."""
+    return doc_name == build_doc_name(channel_name, title, None)
