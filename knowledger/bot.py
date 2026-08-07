@@ -62,7 +62,13 @@ from .upload_service import (
     TranscriptUploadService,
     Uploaded,
 )
-from .youtube import VideoMetadata, build_doc_name, extract_video_id, fetch_video_metadata
+from .youtube import (
+    VideoMetadata,
+    build_doc_name,
+    extract_video_id,
+    fetch_video_metadata,
+    is_undated_doc_name,
+)
 
 logger = get_logger(__name__)
 
@@ -905,9 +911,27 @@ async def handle_project_selection(update: Update, context: CustomContext, user:
         else None
     )
     if existing:
+        # Overwrite replaces `existing` — so it must write the name that doc already
+        # carries, not the one computed above. The two are identical when `existing`
+        # was matched by name; they diverge only on an id match, and then the existing
+        # doc is very likely the poller's, named canonically from the feed's publish
+        # date, while this flow's name may be the dateless fallback. The one exception
+        # is the mirror case (a dateless doc from an earlier blocked attempt, and a
+        # real upload date in hand now): there the replacement is the chance to heal
+        # the name, so this flow's wins.
+        overwrite_name = (
+            file_name
+            if metadata.upload_date
+            and is_undated_doc_name(
+                existing["file_name"],
+                metadata.channel_name,
+                metadata.title,
+            )
+            else existing["file_name"]
+        )
         context.user_data[f"pending_{msg_id_str}"] = PendingUpload(
             project_id=project_id,
-            file_name=file_name,
+            file_name=overwrite_name,
             video_id=metadata.video_id,
             channel_name=metadata.channel_name,
             video_title=metadata.title,

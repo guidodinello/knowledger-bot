@@ -52,6 +52,13 @@ looks that record up, and `TranscriptUploadService.find_existing` falls back to 
 when the name doesn't match: if this video was already uploaded to this project under
 some other name, and a doc with that name is still there, that doc is the duplicate.
 
+On the interactive path the same lookup decides what **Overwrite** writes. That button
+replaces the doc `find_existing` returned, so it has to write the name that doc already
+carries — otherwise replacing a poller-uploaded copy would delete the correctly dated
+doc and put the dateless one back. The exception is the mirror case, where the existing
+doc is the degraded one and this flow does have an upload date: then the replacement is
+the chance to heal the name, and the freshly computed one wins.
+
 Matching by id rather than by "same name ignoring the date" is deliberate. Channels
 that publish under a recurring title (a daily livestream — `En directo "DólarYen"`)
 produce doc names that differ *only* in the date; those are genuinely different videos
@@ -60,8 +67,23 @@ predating the history file, a doc uploaded outside the bot) detection degrades t
 matching, which is the behaviour that predates this fix — never to a failed upload.
 
 **The retry re-resolves the name it was queued with.** `_resolve_doc_name` re-fetches
-the video's metadata when the queued name has no date suffix, so the upload lands under
-the canonical `... - {date}` name both paths agree on — a retry runs after the block has
-lifted, so the date it couldn't get at request time is available now. Best effort: if
-the fetch fails again the queued name is kept, and the video-id check above still
-prevents a second copy.
+the video's metadata when the queued name is the dateless form, so the upload lands
+under the canonical `... - {date}` name both paths agree on — a retry runs after the
+block has lifted, so the date it couldn't get at request time is available now. Best
+effort: if the fetch fails again the queued name is kept, and the video-id check above
+still prevents a second copy.
+
+"Is this name the dateless form?" is answered by `is_undated_doc_name`, which rebuilds
+the dateless name from the entry's channel and title and compares, rather than matching
+the name for a trailing ` - YYYY-MM-DD`. A *title* can end in a date: a video called
+`Mercados - 2026-08-04` builds the dateless `Youtube - Ch - Mercados - 2026-08-04`,
+which no regex can tell apart from a dated name — and reading it as already-dated would
+skip the re-resolution that name needs most. Dated titles are not unusual on the
+news/markets channels being watched.
+
+The queue processor (`petition_queue.json`) deliberately does *not* re-resolve. An entry
+is in that queue because Claude's session token expired, not because YouTube blocked
+us, so its name carries none of the bias toward the dateless form that a
+pending-transcript entry does; the entries that do arrive there from a YouTube-blocked
+origin are handed over by `_drain_one` already re-resolved. It still passes `video_id`,
+which is the layer that prevents a duplicate.

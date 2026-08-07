@@ -36,7 +36,7 @@ from .upload_service import (
     TranscriptUploadService,
     Uploaded,
 )
-from .youtube import build_doc_name, fetch_video_metadata, has_date_suffix, watch_url
+from .youtube import build_doc_name, fetch_video_metadata, is_undated_doc_name, watch_url
 
 logger = get_logger(__name__)
 
@@ -128,7 +128,7 @@ def _resolve_doc_name(entry: PendingTranscript, config: Config) -> str:
     rebuild the name — the entry uploads as the canonical name both paths agree on.
     Best effort: if the fetch fails again, keep the name we already have (the upload
     still gets deduped by video id) rather than losing the retry over it."""
-    if has_date_suffix(entry.file_name):
+    if not is_undated_doc_name(entry.file_name, entry.channel_name, entry.video_title):
         return entry.file_name
     try:
         metadata = fetch_video_metadata(watch_url(entry.video_id), proxy=config.transcript.proxy)

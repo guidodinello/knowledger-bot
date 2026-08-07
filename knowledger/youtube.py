@@ -173,13 +173,16 @@ def build_doc_name(channel_name: str, title: str, upload_date: str | None) -> st
     return f"Youtube - {sanitize_filename(channel_name)} - {sanitize_filename(title)}{date_suffix}"
 
 
-_DATE_SUFFIX_RE = re.compile(r" - \d{4}-\d{2}-\d{2}$")
+def is_undated_doc_name(doc_name: str, channel_name: str, title: str) -> bool:
+    """Whether `doc_name` is the dateless form `build_doc_name` falls back to for this
+    channel and title — the degraded name produced when `upload_date` came back None,
+    and the reason two upload paths for the same video can disagree on what to call it
+    (see `pending_transcripts._resolve_doc_name`).
 
-
-def has_date_suffix(doc_name: str) -> bool:
-    """Whether a doc name carries `build_doc_name`'s date suffix.
-
-    A name without one was built from metadata whose `upload_date` came back None —
-    the degraded form, and the reason two upload paths for the same video can disagree
-    on its name (see `pending_transcripts._resolve_doc_name`)."""
-    return _DATE_SUFFIX_RE.search(doc_name) is not None
+    Rebuilding the dateless name and comparing, rather than pattern-matching the doc
+    name for a trailing ` - YYYY-MM-DD`: a *title* can end in a date too. A video
+    called `Mercados - 2026-08-04` builds the dateless
+    `Youtube - Ch - Mercados - 2026-08-04`, which no regex can tell apart from a dated
+    name — and reading it as already-dated would skip the re-resolution that name
+    needs most."""
+    return doc_name == build_doc_name(channel_name, title, None)
