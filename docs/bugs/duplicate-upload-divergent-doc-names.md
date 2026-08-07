@@ -75,7 +75,7 @@ still prevents a second copy.
 
 "Is this name the dateless form?" is answered by `is_undated_doc_name`, which rebuilds
 the dateless name from the entry's channel and title and compares, rather than matching
-the name for a trailing ` - YYYY-MM-DD`. A *title* can end in a date: a video called
+the name for a trailing `- YYYY-MM-DD`. A *title* can end in a date: a video called
 `Mercados - 2026-08-04` builds the dateless `Youtube - Ch - Mercados - 2026-08-04`,
 which no regex can tell apart from a dated name — and reading it as already-dated would
 skip the re-resolution that name needs most. Dated titles are not unusual on the
