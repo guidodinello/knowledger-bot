@@ -11,7 +11,7 @@
 # The gcc/musl-dev/libffi-dev install this used to need is gone: every dependency now
 # publishes a musllinux wheel, so nothing compiles from source and no compiler ships in the
 # image. That also retires three hand-pinned apk revisions that broke on every Alpine bump.
-FROM python:3.14.5-alpine3.22 AS base
+FROM python:3.15.0b2-alpine3.22 AS base
 
 WORKDIR /app
 
