@@ -60,6 +60,9 @@ jobs:
     name: SSH deploy
     runs-on: ubuntu-latest
     needs: build
+    # No GitHub API calls at all — pure SSH via DEPLOY_HOST/DEPLOY_SSH_KEY secrets.
+    permissions:
+      contents: read
     steps:
       - name: Deploy via SSH
         uses: appleboy/ssh-action@0ff4204d59e8e51228ff73bce53f80d53301dee2  # v1.2.5
