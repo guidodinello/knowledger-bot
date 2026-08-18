@@ -12,6 +12,12 @@ on:
   pull_request:
   workflow_dispatch:
 
+# Default for every job below that doesn't override it — none of the lint/
+# typecheck/test/security/image-build jobs write anything. `changes` keeps
+# its own (contents: read + pull-requests: read for paths-filter).
+permissions:
+  contents: read
+
 jobs:
   # ── Path change detection ──────────────────────────────────────────────────
   # Only the file-type linters are gated on this. The Python jobs always run:
