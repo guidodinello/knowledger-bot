@@ -25,7 +25,7 @@ dev = [
     # than a separately versioned ruff-pre-commit rev. A floor (`>=`) plus an independent
     # hook rev is what let the hook format with one ruff while CI checked with another;
     # one pin consumed by both removes the drift instead of documenting it.
-    "ruff==0.16.3",
+    "ruff==0.16.4",
 ]
 
 [build-system]
