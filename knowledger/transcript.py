@@ -3,7 +3,13 @@ from contextlib import ExitStack
 from pathlib import Path
 
 import requests
-from youtube_transcript_api import NoTranscriptFound, TranscriptsDisabled, YouTubeTranscriptApi
+from youtube_transcript_api import (
+    NoTranscriptFound,
+    Transcript,
+    TranscriptList,
+    TranscriptsDisabled,
+    YouTubeTranscriptApi,
+)
 from youtube_transcript_api._errors import RequestBlocked
 from youtube_transcript_api.proxies import GenericProxyConfig
 
@@ -11,6 +17,9 @@ from .config import ProxyConfig
 from .logger import get_logger
 
 logger = get_logger(__name__)
+
+# Tried after the video's original language, before falling back to any track at all.
+FALLBACK_LANGUAGES = ("en", "es")
 
 
 class TranscriptError(Exception):
@@ -39,6 +48,33 @@ def _build_session(cookies_path: Path | None) -> requests.Session | None:
     return session
 
 
+def _base_language(language_code: str) -> str:
+    return language_code.split("-")[0].lower()
+
+
+def _pick_transcript(transcript_list: TranscriptList) -> Transcript:
+    """Pick the transcript in the video's original language, else English, else
+    Spanish, else whatever track exists.
+
+    YouTube's auto-generated (ASR) track is transcribed from the audio, so its language
+    is the video's original language. Manually uploaded tracks can be in any language
+    (translations, auto-dubs), so iteration order alone isn't a safe signal. Within a
+    language a manual track wins over the ASR one, and regional variants ("es-419")
+    count as the base language."""
+    transcripts = list(transcript_list)
+    if not transcripts:
+        raise NoTranscriptFound(transcript_list.video_id, [], transcript_list)
+    original = next((t.language_code for t in transcripts if t.is_generated), None)
+    preferred = [_base_language(original)] if original is not None else []
+    preferred += [lang for lang in FALLBACK_LANGUAGES if lang not in preferred]
+    for language in preferred:
+        matches = [t for t in transcripts if _base_language(t.language_code) == language]
+        if matches:
+            # Manual tracks first; sorted() is stable so list order breaks ties.
+            return sorted(matches, key=lambda t: t.is_generated)[0]
+    return transcripts[0]
+
+
 def fetch_transcript(
     video_id: str,
     proxy: ProxyConfig | None = None,
@@ -57,12 +93,15 @@ def fetch_transcript(
                 stack.enter_context(session)
             api = YouTubeTranscriptApi(proxy_config=proxy_config, http_client=session)
             transcript_list = api.list(video_id)
-            try:
-                transcript = transcript_list.find_transcript(["en"]).fetch()
-            except NoTranscriptFound:
-                transcript = next(iter(transcript_list)).fetch()
+            chosen = _pick_transcript(transcript_list)
+            transcript = chosen.fetch()
             text = "\n".join(snippet.text.strip() for snippet in transcript.snippets)
-            logger.info("Fetched transcript via YouTube API for %s", video_id)
+            logger.info(
+                "Fetched %s%s transcript via YouTube API for %s",
+                chosen.language_code,
+                " (auto-generated)" if chosen.is_generated else "",
+                video_id,
+            )
             return text
     except (
         RequestBlocked,

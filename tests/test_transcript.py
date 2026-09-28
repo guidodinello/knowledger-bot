@@ -4,7 +4,26 @@ import pytest
 from youtube_transcript_api import NoTranscriptFound, TranscriptsDisabled
 from youtube_transcript_api._errors import RequestBlocked
 
-from knowledger.transcript import TranscriptTransportError, TranscriptUnavailable, fetch_transcript
+from knowledger.transcript import (
+    TranscriptTransportError,
+    TranscriptUnavailable,
+    _pick_transcript,
+    fetch_transcript,
+)
+
+
+def _track(language_code: str, *, is_generated: bool, text: str = "hello") -> MagicMock:
+    track = MagicMock(language_code=language_code, is_generated=is_generated)
+    track.fetch.return_value = MagicMock(snippets=[MagicMock(text=text)])
+    return track
+
+
+def _fake_list(*tracks: MagicMock) -> MagicMock:
+    """A TranscriptList stand-in iterating like the real one: manual tracks first."""
+    transcript_list = MagicMock(video_id="vid")
+    ordered = [t for t in tracks if not t.is_generated] + [t for t in tracks if t.is_generated]
+    transcript_list.__iter__.side_effect = lambda: iter(ordered)
+    return transcript_list
 
 
 def _fake_api(effect) -> MagicMock:
@@ -14,13 +33,7 @@ def _fake_api(effect) -> MagicMock:
     if isinstance(effect, Exception):
         api.list.side_effect = effect
     else:
-        snippet = MagicMock(text="hello")
-        transcript = MagicMock(snippets=[snippet])
-        found = MagicMock()
-        found.fetch.return_value = transcript
-        transcript_list = MagicMock()
-        transcript_list.find_transcript.return_value = found
-        api.list.return_value = transcript_list
+        api.list.return_value = _fake_list(_track("en", is_generated=True))
     return api
 
 
@@ -28,6 +41,49 @@ def test_success_returns_text() -> None:
     api = _fake_api(None)
     with patch("knowledger.transcript.YouTubeTranscriptApi", return_value=api):
         assert fetch_transcript("vid") == "hello"
+
+
+def test_prefers_original_language_over_manual_foreign_track() -> None:
+    # The reported bug: a Spanish video with a manual Arabic track came back in Arabic.
+    arabic = _track("ar", is_generated=False)
+    spanish = _track("es", is_generated=True)
+    assert _pick_transcript(_fake_list(arabic, spanish)) is spanish
+
+
+def test_prefers_original_language_over_english() -> None:
+    english = _track("en", is_generated=False)
+    spanish = _track("es", is_generated=True)
+    assert _pick_transcript(_fake_list(english, spanish)) is spanish
+
+
+def test_manual_track_wins_within_original_language() -> None:
+    manual = _track("es-419", is_generated=False)
+    generated = _track("es", is_generated=True)
+    assert _pick_transcript(_fake_list(manual, generated)) is manual
+
+
+def test_without_generated_track_falls_back_to_english_then_spanish() -> None:
+    arabic = _track("ar", is_generated=False)
+    spanish = _track("es", is_generated=False)
+    english = _track("en-US", is_generated=False)
+    assert _pick_transcript(_fake_list(arabic, spanish, english)) is english
+    assert _pick_transcript(_fake_list(arabic, spanish)) is spanish
+
+
+def test_falls_back_to_any_track() -> None:
+    arabic = _track("ar", is_generated=False)
+    french = _track("fr", is_generated=False)
+    assert _pick_transcript(_fake_list(arabic, french)) is arabic
+
+
+def test_empty_list_raises_unavailable() -> None:
+    api = MagicMock()
+    api.list.return_value = _fake_list()
+    with (
+        patch("knowledger.transcript.YouTubeTranscriptApi", return_value=api),
+        pytest.raises(TranscriptUnavailable),
+    ):
+        fetch_transcript("vid")
 
 
 def test_transcripts_disabled_raises_unavailable() -> None:
