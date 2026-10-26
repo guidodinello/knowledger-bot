@@ -585,7 +585,7 @@ requires-dist = [
     { name = "defusedxml", specifier = ">=0.7.1" },
     { name = "python-dotenv", specifier = ">=1.0.0" },
     { name = "python-telegram-bot", specifier = ">=22.8" },
-    { name = "youtube-transcript-api", specifier = ">=1.0.0" },
+    { name = "youtube-transcript-api", specifier = ">=1.0.0,<2" },
 ]
 
 [package.metadata.requires-dev]
