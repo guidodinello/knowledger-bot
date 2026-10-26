@@ -52,19 +52,56 @@ def _base_language(language_code: str) -> str:
     return language_code.split("-")[0].lower()
 
 
-def _pick_transcript(transcript_list: TranscriptList) -> Transcript:
+def _original_audio_language(captions_json: dict) -> str | None:
+    """The base language of the video's default audio track, or None when YouTube
+    doesn't name it.
+
+    Only videos with several audio tracks (auto-dubs) carry an `audioTrackId` such as
+    "es-US.4"; the default track is the one the video was recorded in."""
+    tracks = captions_json.get("audioTracks", [])
+    index = captions_json.get("defaultAudioTrackIndex", 0)
+    if index >= len(tracks):
+        return None
+    track_id = tracks[index].get("audioTrackId")
+    return _base_language(track_id.split(".")[0]) if track_id else None
+
+
+def _list_transcripts(
+    api: YouTubeTranscriptApi,
+    video_id: str,
+) -> tuple[TranscriptList, str | None]:
+    """`api.list(video_id)` plus the video's original audio language.
+
+    TranscriptList drops the audio-track info from YouTube's captions JSON, so this
+    does what `api.list` does internally — same single request — and keeps the JSON.
+    Uses the library's private fetcher; the version range in pyproject.toml guards it."""
+    fetcher = api._fetcher
+    captions_json = fetcher._fetch_captions_json(video_id)
+    transcript_list = TranscriptList.build(fetcher._http_client, video_id, captions_json)
+    return transcript_list, _original_audio_language(captions_json)
+
+
+def _pick_transcript(
+    transcript_list: TranscriptList,
+    original_language: str | None = None,
+) -> Transcript:
     """Pick the transcript in the video's original language, else English, else
     Spanish, else whatever track exists.
 
-    YouTube's auto-generated (ASR) track is transcribed from the audio, so its language
-    is the video's original language. Manually uploaded tracks can be in any language
-    (translations, auto-dubs), so iteration order alone isn't a safe signal. Within a
-    language a manual track wins over the ASR one, and regional variants ("es-419")
-    count as the base language."""
+    `original_language` comes from the default audio track when YouTube names it.
+    Without it, the auto-generated (ASR) track's language stands in: it's transcribed
+    from the audio. That only holds for a single audio track — an auto-dubbed video has
+    one ASR track per dubbed language, in no useful order. Manually uploaded tracks can
+    be in any language (translations), so iteration order alone isn't a safe signal.
+    Within a language a manual track wins over the ASR one, and regional variants
+    ("es-419") count as the base language."""
     transcripts = list(transcript_list)
     if not transcripts:
         raise NoTranscriptFound(transcript_list.video_id, [], transcript_list)
-    original = next((t.language_code for t in transcripts if t.is_generated), None)
+    original = original_language or next(
+        (t.language_code for t in transcripts if t.is_generated),
+        None,
+    )
     preferred = [_base_language(original)] if original is not None else []
     preferred += [lang for lang in FALLBACK_LANGUAGES if lang not in preferred]
     for language in preferred:
@@ -92,8 +129,8 @@ def fetch_transcript(
             if session is not None:
                 stack.enter_context(session)
             api = YouTubeTranscriptApi(proxy_config=proxy_config, http_client=session)
-            transcript_list = api.list(video_id)
-            chosen = _pick_transcript(transcript_list)
+            transcript_list, original_language = _list_transcripts(api, video_id)
+            chosen = _pick_transcript(transcript_list, original_language)
             transcript = chosen.fetch()
             text = "\n".join(snippet.text.strip() for snippet in transcript.snippets)
             logger.info(
