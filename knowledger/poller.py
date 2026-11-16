@@ -11,6 +11,7 @@ it as a doc into ``config.poller.auto_transcript_project`` (or a channel's own
 import asyncio
 import fcntl
 import re
+import time
 from collections.abc import Iterator
 from contextlib import contextmanager
 from dataclasses import asdict, dataclass, field, replace
@@ -50,6 +51,8 @@ from .youtube import build_doc_name
 logger = get_logger(__name__)
 
 FEED_URL = "https://www.youtube.com/feeds/videos.xml"
+DIRECT_FETCH_ATTEMPTS = 3
+RETRY_DELAY_SECONDS = 2.0
 ATOM_NS = "{http://www.w3.org/2005/Atom}"
 YT_NS = "{http://www.youtube.com/xml/schemas/2015}"
 
@@ -193,6 +196,23 @@ def _proxies(proxy: ProxyConfig | None) -> dict[str, str] | None:
     return {"http": proxy.url, "https": proxy.url} if proxy else None
 
 
+def _get_direct_with_retries(url: str, params: dict[str, str]) -> str:
+    """YouTube's RSS endpoint answers a random ~10-15% of requests with 404 or 500 (seen
+    from the VPS on 2026-11-16: a different channel failed each round, and the same URL
+    succeeded seconds later). Without retries, every such blip skipped that channel until
+    the next hourly tick. Callers run in a worker thread, so sleeping here is fine."""
+    for attempt in range(1, DIRECT_FETCH_ATTEMPTS + 1):
+        try:
+            response = requests.get(url, params=params, impersonate="chrome110")
+            response.raise_for_status()
+            return response.text
+        except RequestException:
+            if attempt == DIRECT_FETCH_ATTEMPTS:
+                raise
+            time.sleep(RETRY_DELAY_SECONDS * attempt)
+    raise AssertionError("unreachable: the last attempt returns or raises")
+
+
 def _http_get(url: str, params: dict[str, str], proxy: ProxyConfig | None) -> str:
     """GET as a browser. Try direct first; fall back to the proxy only if direct fails.
 
@@ -200,9 +220,7 @@ def _http_get(url: str, params: dict[str, str], proxy: ProxyConfig | None) -> st
     channel pages often work direct — so we avoid paid proxy bandwidth unless we must.
     """
     try:
-        response = requests.get(url, params=params, impersonate="chrome110")
-        response.raise_for_status()
-        return response.text
+        return _get_direct_with_retries(url, params)
     except RequestException:
         if proxy is None:
             raise
