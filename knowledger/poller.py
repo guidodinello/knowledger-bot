@@ -206,10 +206,21 @@ def _get_direct_with_retries(url: str, params: dict[str, str]) -> str:
             response = requests.get(url, params=params, impersonate="chrome110")
             response.raise_for_status()
             return response.text
-        except RequestException:
+        except RequestException as exc:
             if attempt == DIRECT_FETCH_ATTEMPTS:
                 raise
-            time.sleep(RETRY_DELAY_SECONDS * attempt)
+            delay = RETRY_DELAY_SECONDS * attempt
+            # One line per retry, so `grep "retrying direct fetch"` shows how often YouTube blips.
+            logger.info(
+                "Direct fetch of %s %s failed (%s); retrying direct fetch %d/%d in %.0fs",
+                url,
+                params,
+                exc,
+                attempt + 1,
+                DIRECT_FETCH_ATTEMPTS,
+                delay,
+            )
+            time.sleep(delay)
     raise AssertionError("unreachable: the last attempt returns or raises")
 
 

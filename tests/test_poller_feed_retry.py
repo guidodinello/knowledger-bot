@@ -2,6 +2,7 @@
 fetch is retried before falling back to the proxy, instead of skipping the channel until
 the next hourly tick on the first blip."""
 
+import logging
 from dataclasses import dataclass, field
 
 import pytest
@@ -49,6 +50,20 @@ def test_a_transient_404_is_retried_directly(youtube: _FakeYouTube) -> None:
     assert body == "<feed/>"
     assert len(youtube.calls) == 2
     assert all("proxies" not in c for c in youtube.calls)  # the paid proxy was not needed
+
+
+def test_each_retry_is_logged_once(youtube: _FakeYouTube, caplog: pytest.LogCaptureFixture) -> None:
+    youtube.responses = [_FakeResponse(404), _FakeResponse(500), _FakeResponse(200, "<feed/>")]
+
+    with caplog.at_level(logging.INFO, logger=poller.logger.name):
+        poller._http_get(poller.FEED_URL, {"channel_id": "UC1"}, None)
+
+    retries = [r.getMessage() for r in caplog.records if "retrying direct fetch" in r.getMessage()]
+    assert len(retries) == 2
+    assert "UC1" in retries[0]
+    assert "404" in retries[0]
+    assert "retrying direct fetch 2/3" in retries[0]
+    assert "retrying direct fetch 3/3" in retries[1]
 
 
 def test_persistent_failure_without_proxy_raises_after_all_attempts(youtube: _FakeYouTube) -> None:

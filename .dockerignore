@@ -1,0 +1,17 @@
+# Allowlist: the build context holds only what the Dockerfile COPYs. Everything else
+# stays out, notably secrets (.env, .env.oracle, cookies.txt), local venvs and caches.
+# A new COPY of a path not listed here fails the build loudly instead of silently
+# shipping something. Keep this in sync with the Dockerfile's COPY lines.
+*
+!pyproject.toml
+!uv.lock
+!README.md
+!main.py
+!cli.py
+!knowledger/
+!tests/
+!scripts/
+
+# Stale bytecode from a local run could shadow the copied source inside the image.
+**/__pycache__
+**/*.pyc
