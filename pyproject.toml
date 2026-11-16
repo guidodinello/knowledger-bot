@@ -26,6 +26,7 @@ dev = [
     # hook rev is what let the hook format with one ruff while CI checked with another;
     # one pin consumed by both removes the drift instead of documenting it.
     "ruff==0.17.5",
+    "trustme>=1.2.1",
 ]
 
 [build-system]

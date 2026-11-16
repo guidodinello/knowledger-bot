@@ -47,7 +47,7 @@ async def main_async(config: Config) -> None:
                     telegram_app=app,
                     config=config,
                 )
-                tasks.append(tg.create_task(run_http_server(aiohttp_app, config.token_server.port)))
+                tasks.append(tg.create_task(run_http_server(aiohttp_app, config.token_server)))
 
             if config.weekly_recap.enabled:
                 from knowledger.weekly_recap import run_weekly_recap
