@@ -111,7 +111,7 @@ recreate() {
     $SSH "docker pull $image"
     $SSH "docker rm -f knowledger 2>/dev/null || true"
     $SSH "mkdir -p \$HOME/knowledger-bot/data && sudo chown -R 1001:1001 \$HOME/knowledger-bot/data"
-    $SSH "cd $REMOTE_DIR && docker run -d --name knowledger --restart unless-stopped --network=host --env-file .env -v \$HOME/knowledger-bot/cookies.txt:/app/cookies.txt:ro -v \$HOME/knowledger-bot/data:/app/data --log-opt max-size=10m --log-opt max-file=3 $image"
+    $SSH "cd $REMOTE_DIR && docker run -d --name knowledger --restart unless-stopped --network=host --env-file .env -v \$HOME/knowledger-bot/cookies.txt:/app/cookies.txt:ro -v \$HOME/knowledger-bot/data:/app/data -v \$HOME/knowledger-bot/tls:/app/tls:ro --log-opt max-size=10m --log-opt max-file=3 $image"
     echo "Waiting for bot to start..."
     $SSH "docker logs -f knowledger 2>&1 | grep -m1 'Application started'"
     echo "Bot is up."

@@ -88,10 +88,17 @@ class TokenServerSettings:
     secret: str | None = None
     personal_org_id: str | None = None
     cors_allowed_origin: str = "*"
+    tls_cert_path: Path | None = None
+    tls_key_path: Path | None = None
 
     def __post_init__(self) -> None:
         if self.port is not None and self.secret is None:
             raise ValueError("TOKEN_UPDATE_SECRET must be set when TOKEN_SERVER_PORT is configured")
+        # Fail closed: half a TLS config must not quietly fall back to plain HTTP.
+        if (self.tls_cert_path is None) != (self.tls_key_path is None):
+            raise ValueError(
+                "TOKEN_SERVER_TLS_CERT and TOKEN_SERVER_TLS_KEY must be set together",
+            )
 
 
 @dataclass(frozen=True, slots=True)
@@ -236,6 +243,8 @@ def load_config() -> Config:
             secret=os.getenv("TOKEN_UPDATE_SECRET") or None,
             personal_org_id=os.getenv("PERSONAL_ORG_ID") or None,
             cors_allowed_origin=os.getenv("CORS_ALLOWED_ORIGIN") or "*",
+            tls_cert_path=Path(cert) if (cert := os.getenv("TOKEN_SERVER_TLS_CERT")) else None,
+            tls_key_path=Path(key) if (key := os.getenv("TOKEN_SERVER_TLS_KEY")) else None,
         ),
         poller=PollerSettings(
             auto_transcript_project=os.getenv("AUTO_TRANSCRIPT_PROJECT") or None,

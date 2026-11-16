@@ -104,6 +104,7 @@ jobs:
               --env-file .env \
               -v /home/ubuntu/knowledger-bot/cookies.txt:/app/cookies.txt:ro \
               -v /home/ubuntu/knowledger-bot/data:/app/data \
+              -v /home/ubuntu/knowledger-bot/tls:/app/tls:ro \
               --log-opt max-size=10m --log-opt max-file=3 \
               "$IMAGE"
             docker image prune -f

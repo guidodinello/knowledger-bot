@@ -1,5 +1,6 @@
 import asyncio
 import hmac
+import ssl
 from enum import StrEnum
 from http import HTTPStatus
 
@@ -190,11 +191,30 @@ def build_aiohttp_app(
     return app
 
 
-async def run_http_server(aiohttp_app: web.Application, port: int) -> None:
+def build_ssl_context(settings: TokenServerSettings) -> ssl.SSLContext | None:
+    """TLS context for the token endpoint, or None to serve plain HTTP (local dev only:
+    over HTTP the secret and the posted session token cross the network in clear text).
+    Loading here, at startup, makes a missing or unreadable cert crash the bot instead of
+    the first request."""
+    if settings.tls_cert_path is None or settings.tls_key_path is None:
+        return None
+    context = ssl.create_default_context(ssl.Purpose.CLIENT_AUTH)
+    context.load_cert_chain(settings.tls_cert_path, settings.tls_key_path)
+    return context
+
+
+async def run_http_server(aiohttp_app: web.Application, settings: TokenServerSettings) -> None:
+    if settings.port is None:
+        raise ValueError("run_http_server needs TOKEN_SERVER_PORT")
+    ssl_context = build_ssl_context(settings)
     runner = web.AppRunner(aiohttp_app)
     await runner.setup()
-    await web.TCPSite(runner, "0.0.0.0", port).start()  # nosec B104 - binds all interfaces since this runs in a container; the port is reachable from the internet in deployment, so /update-token relies on its own secret+HMAC check, not network isolation, for auth
-    logger.info("Token update server listening on port %d", port)
+    await web.TCPSite(runner, "0.0.0.0", settings.port, ssl_context=ssl_context).start()  # nosec B104 - binds all interfaces since this runs in a container; the port is reachable from the internet in deployment, so /update-token relies on its own shared-secret check, not network isolation, for auth
+    logger.info(
+        "Token update server listening on port %d (%s)",
+        settings.port,
+        "HTTPS" if ssl_context else "plain HTTP",
+    )
     try:
         await asyncio.Event().wait()
     finally:

@@ -79,6 +79,7 @@ That check exists so the bot can hold a session of its own instead of borrowing 
 | `PROJECT_WHITELIST` | No | Comma-separated project names to show (shows all if unset) |
 | `TOKEN_SERVER_PORT` | No | Port for the HTTP token update endpoint (disabled if unset) |
 | `TOKEN_UPDATE_SECRET` | If `TOKEN_SERVER_PORT` is set | Shared secret to protect the HTTP endpoint |
+| `TOKEN_SERVER_TLS_CERT`, `TOKEN_SERVER_TLS_KEY` | No (set both or neither) | Certificate and key paths; when set, the endpoint serves HTTPS. Without them it is plain HTTP, which sends the secret and session token in clear text |
 | `CORS_ALLOWED_ORIGIN` | No | Allowed CORS origin for the HTTP endpoint (e.g. `chrome-extension://<id>`); defaults to `*` |
 | `PERSONAL_ORG_ID` | No | Claude org UUID; if set, the HTTP endpoint rejects tokens from other accounts (prevents work-account tokens from being accepted) |
 
