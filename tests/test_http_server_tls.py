@@ -7,12 +7,12 @@ import asyncio
 import contextlib
 import socket
 import ssl
-import subprocess
 from pathlib import Path
 from typing import cast
 
 import aiohttp
 import pytest
+import trustme
 from aiohttp import web
 from telegram.ext import Application
 
@@ -29,18 +29,16 @@ from knowledger.queue import Queue
 from knowledger.queue_processor import QueueProcessor
 
 
-def _self_signed_cert(directory: Path) -> tuple[Path, Path]:
-    cert, key = directory / "cert.pem", directory / "key.pem"
-    subprocess.run(
-        [
-            "openssl", "req", "-x509", "-newkey", "rsa:2048", "-nodes",
-            "-keyout", str(key), "-out", str(cert), "-days", "1",
-            "-subj", "/CN=localhost", "-addext", "subjectAltName=IP:127.0.0.1",
-        ],
-        check=True,
-        capture_output=True,
-    )  # fmt: skip
-    return cert, key
+def _throwaway_cert(directory: Path) -> tuple[Path, Path, Path]:
+    """Server cert and key for 127.0.0.1, plus the CA that signed them for the client to
+    trust. Generated in-process: the CI test image has no openssl binary."""
+    ca = trustme.CA()
+    leaf = ca.issue_cert("127.0.0.1")
+    cert, key, ca_cert = directory / "cert.pem", directory / "key.pem", directory / "ca.pem"
+    leaf.cert_chain_pems[0].write_to_path(str(cert))
+    leaf.private_key_pem.write_to_path(str(key))
+    ca.cert_pem.write_to_path(str(ca_cert))
+    return cert, key, ca_cert
 
 
 def _free_port() -> int:
@@ -88,10 +86,10 @@ async def _post_wrong_secret(settings: TokenServerSettings, url: str, **request_
 
 
 def test_serves_https_when_cert_and_key_are_set(tmp_path: Path) -> None:
-    cert, key = _self_signed_cert(tmp_path)
+    cert, key, ca_cert = _throwaway_cert(tmp_path)
     port = _free_port()
     settings = TokenServerSettings(port=port, secret="s3cr3t", tls_cert_path=cert, tls_key_path=key)
-    trust_our_cert = ssl.create_default_context(cafile=cert)
+    trust_our_cert = ssl.create_default_context(cafile=ca_cert)
 
     status = asyncio.run(
         _post_wrong_secret(settings, f"https://127.0.0.1:{port}/update-token", ssl=trust_our_cert)
@@ -102,7 +100,7 @@ def test_serves_https_when_cert_and_key_are_set(tmp_path: Path) -> None:
 
 
 def test_plain_http_is_refused_when_tls_is_configured(tmp_path: Path) -> None:
-    cert, key = _self_signed_cert(tmp_path)
+    cert, key, _ = _throwaway_cert(tmp_path)
     port = _free_port()
     settings = TokenServerSettings(port=port, secret="s3cr3t", tls_cert_path=cert, tls_key_path=key)
 
