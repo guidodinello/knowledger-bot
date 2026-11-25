@@ -295,7 +295,7 @@ jobs:
       - name: zizmor
         env:
           GH_TOKEN: ${{ github.token }}
-        run: uvx zizmor@1.31.1 --format=github .github/workflows
+        run: uvx zizmor@1.31.1 --persona auditor --format=github .github/workflows
 
   # ── Markdown lint ──────────────────────────────────────────────────────────
   lint-markdown:
