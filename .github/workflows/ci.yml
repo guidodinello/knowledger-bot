@@ -102,6 +102,10 @@ jobs:
       # Hook envs live in ~/.cache/pre-commit, outside setup-uv's cache.
       # pre-commit rebuilds an env whose interpreter has since changed.
       - uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        # Persistent homelab runners keep ~/.cache/pre-commit on disk; restoring or
+        # saving it through actions/cache only costs time there (same reasoning as
+        # setup-uv's enable-cache above, fitted Issue 361).
+        if: ${{ !contains(runner.name, 'homelab') }}
         with:
           path: ~/.cache/pre-commit
           key: pre-commit-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('.pre-commit-config.yaml') }}
