@@ -85,16 +85,17 @@ jobs:
           key: ${{ secrets.DEPLOY_SSH_KEY }}
           fingerprint: ${{ secrets.DEPLOY_HOST_FINGERPRINT }}
           command_timeout: 10m
-          # appleboy/drone-ssh reads INPUT_SCRIPT_STOP directly and aborts the
-          # remote script on the first failing command (a failed `docker pull`,
-          # e.g. GHCR auth, would otherwise be swallowed and report success).
-          script_stop: true
           # The image carries no deployment data at all, so the VPS needs no git
           # checkout — only the persistent host files: .env, cookies.txt, and
           # data/ (poller state, including channels.json). Those are managed
           # out-of-band via `./deploy.sh env` / `./deploy.sh cookies` /
           # `./deploy.sh channels`, never through CI.
+          # `set -e` aborts the remote script on the first failing command, so a failed
+          # `docker pull` (e.g. GHCR auth) stops before the running container is removed.
+          # ssh-action v1 dropped the script_stop input: it is not forwarded to
+          # drone-ssh (no INPUT_SCRIPT_STOP in the run's env), so it did nothing.
           script: |
+            set -e
             cd /home/ubuntu/knowledger-bot
             docker pull "$IMAGE"
             # Order matters here, in both directions.
@@ -105,7 +106,7 @@ jobs:
             # it touches, which is the race this chown exists to avoid.
             #
             # mkdir precedes chown because chown exits 1 on a missing path and
-            # script_stop: true aborts the remote script on the first failure,
+            # `set -e` aborts the remote script on the first failure,
             # so a first deploy to an unprovisioned host would die here.
             docker rm -f knowledger || true
             mkdir -p /home/ubuntu/knowledger-bot/data
