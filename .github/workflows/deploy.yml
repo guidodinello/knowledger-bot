@@ -8,6 +8,9 @@ concurrency:
   group: deploy-production
   cancel-in-progress: false
 
+# No default token scope: each job below declares exactly what it needs.
+permissions: {}
+
 jobs:
   build:
     name: Build and push image

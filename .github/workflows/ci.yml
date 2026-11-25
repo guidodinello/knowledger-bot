@@ -263,7 +263,7 @@ jobs:
           persist-credentials: false
 
       - name: actionlint
-        uses: docker://rhysd/actionlint:1.7.12
+        uses: docker://rhysd/actionlint:1.7.12@sha256:b1934ee5f1c509618f2508e6eb47ee0d3520686341fec936f3b79331f9315667
         with:
           args: -color
 
@@ -397,8 +397,10 @@ jobs:
     runs-on: ${{ fromJSON(vars.CI_RUNNERS || '["ubuntu-latest"]') }}
     steps:
       - name: Check results
+        env:
+          RESULTS: ${{ join(needs.*.result, ' ') }}
         run: |
-          results=(${{ join(needs.*.result, ' ') }})
+          read -ra results <<< "$RESULTS"
           for r in "${results[@]}"; do
             if [[ "$r" == "failure" || "$r" == "cancelled" ]]; then
               exit 1
