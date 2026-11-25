@@ -40,7 +40,7 @@ jobs:
     runs-on: ${{ fromJSON(vars.CI_RUNNERS || '["ubuntu-latest"]') }}
     permissions:
       contents: read
-      pull-requests: read
+      pull-requests: read  # dorny/paths-filter lists a PR's changed files through the API
     outputs:
       dockerfiles: ${{ steps.filter.outputs.dockerfiles }}
       dockerfile_paths_files: ${{ steps.filter.outputs.dockerfile_paths_files }}

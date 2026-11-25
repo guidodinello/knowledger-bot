@@ -19,7 +19,7 @@ jobs:
     if: vars.DEPLOY_ENABLED == 'true'
     permissions:
       contents: read
-      packages: write
+      packages: write  # push the built image to GHCR
     outputs:
       short_sha: ${{ steps.sha.outputs.short_sha }}
     steps:
