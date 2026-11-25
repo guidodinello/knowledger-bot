@@ -65,6 +65,9 @@ jobs:
     name: SSH deploy
     runs-on: ubuntu-latest
     needs: build
+    # The DEPLOY_* secrets live in this environment, which only main may deploy to,
+    # so no other branch's workflow can read them.
+    environment: Oracle VPS
     # No GitHub API calls at all — pure SSH via DEPLOY_HOST/DEPLOY_SSH_KEY secrets.
     permissions:
       contents: read
