@@ -42,9 +42,11 @@ jobs:
       shell_paths_files: ${{ steps.filter.outputs.shell_paths_files }}
       workflows: ${{ steps.filter.outputs.workflows }}
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
 
-      - uses: dorny/paths-filter@v4
+      - uses: dorny/paths-filter@ceb8a2b8f2d89434be7ff52d3de7ec3738c5cc9d # v4.0.3
         id: filter
         with:
           list-files: json
@@ -74,9 +76,11 @@ jobs:
     name: Lint Python
     runs-on: ${{ fromJSON(vars.CI_RUNNERS || '["ubuntu-latest"]') }}
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
 
-      - uses: astral-sh/setup-uv@v7
+      - uses: astral-sh/setup-uv@68559e99cc807c1eb7e9238fd43a15bba460eec2 # v10.3.3
         with:
           # Must match language_version in .pre-commit-config.yaml, or uv
           # builds the venv on the newest allowed Python and pre-commit
@@ -112,9 +116,11 @@ jobs:
     name: Typecheck Python
     runs-on: ${{ fromJSON(vars.CI_RUNNERS || '["ubuntu-latest"]') }}
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
 
-      - uses: astral-sh/setup-uv@v7
+      - uses: astral-sh/setup-uv@68559e99cc807c1eb7e9238fd43a15bba460eec2 # v10.3.3
 
       - name: Install dependencies
         run: uv sync --locked --dev
@@ -127,9 +133,11 @@ jobs:
     name: Tests (Python)
     runs-on: ${{ fromJSON(vars.CI_RUNNERS || '["ubuntu-latest"]') }}
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
 
-      - uses: astral-sh/setup-uv@v7
+      - uses: astral-sh/setup-uv@68559e99cc807c1eb7e9238fd43a15bba460eec2 # v10.3.3
 
       - name: Install dependencies
         run: uv sync --locked --dev
@@ -142,9 +150,11 @@ jobs:
     name: Security Scan (Python)
     runs-on: ${{ fromJSON(vars.CI_RUNNERS || '["ubuntu-latest"]') }}
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
 
-      - uses: astral-sh/setup-uv@v7
+      - uses: astral-sh/setup-uv@68559e99cc807c1eb7e9238fd43a15bba460eec2 # v10.3.3
 
       - name: Install dependencies
         run: uv sync --locked --dev
@@ -167,7 +177,9 @@ jobs:
     if: needs.changes.outputs.dockerfiles == 'true'
     runs-on: ${{ fromJSON(vars.CI_RUNNERS || '["ubuntu-latest"]') }}
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
 
       - name: hadolint
         env:
@@ -205,7 +217,9 @@ jobs:
     if: needs.changes.outputs.shell == 'true'
     runs-on: ${{ fromJSON(vars.CI_RUNNERS || '["ubuntu-latest"]') }}
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
 
       - name: shellcheck
         env:
@@ -240,12 +254,36 @@ jobs:
     if: needs.changes.outputs.workflows == 'true'
     runs-on: ${{ fromJSON(vars.CI_RUNNERS || '["ubuntu-latest"]') }}
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
 
       - name: actionlint
         uses: docker://rhysd/actionlint:1.7.12
         with:
           args: -color
+
+  # Audits the workflow files with zizmor. Blocking: a finding fails the job.
+  # The version is pinned so a new upstream audit cannot turn this red between
+  # runs; Dependabot does not bump a `uvx` pin, so bump it by hand. GH_TOKEN is
+  # the read-only workflow token; it enables the online audits that check each
+  # pinned SHA really belongs to the tagged repo.
+  audit-workflows:
+    name: Audit workflows
+    needs: changes
+    if: needs.changes.outputs.workflows == 'true'
+    runs-on: ${{ fromJSON(vars.CI_RUNNERS || '["ubuntu-latest"]') }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - uses: astral-sh/setup-uv@68559e99cc807c1eb7e9238fd43a15bba460eec2 # v10.3.3
+
+      - name: zizmor
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: uvx zizmor@1.31.1 --format=github .github/workflows
 
   # ── Markdown lint ──────────────────────────────────────────────────────────
   lint-markdown:
@@ -254,9 +292,11 @@ jobs:
     if: needs.changes.outputs.markdown == 'true'
     runs-on: ${{ fromJSON(vars.CI_RUNNERS || '["ubuntu-latest"]') }}
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
 
-      - uses: actions/setup-node@v7
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
         with:
           node-version: 22
 
@@ -298,7 +338,9 @@ jobs:
     name: Build Image & Test Inside
     runs-on: ${{ fromJSON(vars.CI_RUNNERS || '["ubuntu-latest"]') }}
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
 
       - name: Build test image
         run: docker build --target test -t knowledger:test .
@@ -345,6 +387,7 @@ jobs:
       - lint-dockerfile
       - lint-shell
       - lint-workflows
+      - audit-workflows
       - lint-markdown
     if: always()
     runs-on: ${{ fromJSON(vars.CI_RUNNERS || '["ubuntu-latest"]') }}
