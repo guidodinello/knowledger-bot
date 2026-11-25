@@ -1,0 +1,11 @@
+# zizmor config, read by the "Audit workflows" CI job.
+rules:
+  template-injection:
+    ignore:
+      # The SSH deploy script interpolates needs.build.outputs.short_sha, which the
+      # build job sets from `git rev-parse --short HEAD`, so it is always hex and
+      # cannot carry shell code. An inline ignore does not work inside the block
+      # scalar, and moving the value into an env var changes how the production
+      # deploy passes it, which CI cannot test. Line-based, so re-check this entry
+      # if deploy.yml is edited above that line.
+      - deploy.yml:87
