@@ -1,6 +1,6 @@
 # Transcription Plan: faster-whisper + yt-dlp fallback
 
-**Context**: Some YouTube videos don't have captions. The thesis project (`~/Desktop/fac/2024/proyecto-grado/tesis`) already has `yt-dlp` + `faster-whisper`. We process locally (not VPS) and upload via `claude-client`.
+**Context**: Some YouTube videos don't have captions. The thesis project (`~/Documents/facultad/2024/proyecto-grado/tesis`) is meant to provide `yt-dlp` + `faster-whisper` (its venv must be created first; see Dependencies). We process locally (not VPS) and upload via `claude-client`.
 
 ## Pipeline
 
@@ -44,8 +44,8 @@ claude-client docs upload <uuid> out.txt --name "Title"
 
 ## Dependencies
 
-`faster-whisper` and `yt-dlp` are in the thesis project's venv (`~/Desktop/fac/2024/proyecto-grado/tesis/backend/.venv`). Run with:
+The thesis project's venv (`~/Documents/facultad/2024/proyecto-grado/tesis/backend/.venv`) does not exist, so it must be created with `faster-whisper` and `yt-dlp` installed before running. Then run with:
 
 ```bash
-/home/guido/Desktop/fac/2024/proyecto-grado/tesis/backend/.venv/bin/python scripts/transcribe.py <url>
+/home/guido/Documents/facultad/2024/proyecto-grado/tesis/backend/.venv/bin/python scripts/transcribe.py <url>
 ```
